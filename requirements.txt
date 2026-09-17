@@ -1,0 +1,3 @@
+# BugBounty-Recon — Python Dependencies
+# Author: Ahmed Wael
+requests>=2.31.0

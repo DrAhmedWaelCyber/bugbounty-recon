@@ -1,0 +1,3 @@
+# BugBounty-Recon — Persistent Subdomain Baseline
+# Auto-managed by main.py — do not edit manually.
+# Author: Ahmed Wael
