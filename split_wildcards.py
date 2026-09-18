@@ -4,10 +4,10 @@ split_wildcards.py — Weekly Wildcard Fetcher & Splitter
 =========================================================
 Developer : Ahmed Wael
 Purpose   : Fetch the live wildcard targets from the upstream bounty-targets-data
-            repository and split the full list into 21 equal part files.
+            repository and split the full list into 63 equal part files.
             Run once per week (every Monday) via GitHub Actions.
-            The 21 part files are committed back to the repository so the daily
-            recon workflow can process 3 parts per day across the week.
+            The 63 part files are committed back to the repository so the daily
+            recon workflow can process 9 parts per day across the 7-day week.
 License   : MIT
 """
 
@@ -36,7 +36,7 @@ WILDCARDS_URL = (
     "main/data/wildcards.txt"
 )
 PARTS_DIR     = Path("parts")
-TOTAL_PARTS   = 21       # 3 parts/day × 7 days = 21-part weekly rotation
+TOTAL_PARTS   = 63       # 9 parts/day × 7 days = 63-part weekly rotation
 REQUEST_TIMEOUT = 60     # seconds
 
 

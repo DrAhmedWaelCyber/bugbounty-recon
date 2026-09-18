@@ -3,16 +3,23 @@
 main.py — BugBounty-Recon Daily Reconnaissance Pipeline
 =========================================================
 Developer : Ahmed Wael
-Purpose   : Orchestrate a full daily recon cycle for a designated set of target
-            part files:
-              1. Load targets from the pre-split part files.
-              2. Discover subdomains with subfinder (fast/all-sources).
-              3. Probe discovered subdomains with httpx (active host detection).
-              4. Diff against the persistent baseline to isolate new assets.
-              5. Triage new active hosts against high-value keyword list.
-              6. Generate a professional branded HTML email report.
-              7. Dispatch the report via SMTP.
-              8. Update the persistent baseline file.
+Purpose   : Orchestrate daily recon across a designated set of part files,
+            processing them SEQUENTIALLY with a 3-minute cooldown between
+            each part.  After each part completes, a branded HTML email
+            report is dispatched immediately.
+
+Pipeline per part
+-----------------
+  1. Load targets from the pre-split part file.
+  2. Discover subdomains with subfinder (all-sources, silent).
+  3. Probe discovered subdomains with httpx (active-host detection).
+  4. Diff against the persistent baseline → isolate brand-new assets.
+  5. Triage new active hosts → priority-ranked high-value targets.
+  6. Generate a professional HTML email report.
+  7. Dispatch the report via SMTP.
+  8. Update the persistent baseline (disk + in-memory) immediately.
+  9. Sleep 3 minutes before starting the next part (cooldown).
+
 License   : MIT
 """
 
@@ -46,20 +53,22 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PARTS_DIR     = Path("parts")
-BASELINE_FILE = Path("baseline_subs.txt")
-TOTAL_PARTS   = 21
+PARTS_DIR              = Path("parts")
+BASELINE_FILE          = Path("baseline_subs.txt")
+TOTAL_PARTS            = 63          # 9 parts/day × 7 days = 63-part weekly rotation
+COOLDOWN_BETWEEN_PARTS = 180         # 3 minutes between sequential part runs
 
 # Subprocess timeouts (seconds)
-SUBFINDER_TIMEOUT = 3600   # 1 hour per batch
-HTTPX_TIMEOUT_CLI = 3600   # 1 hour for the full probe phase
+SUBFINDER_TIMEOUT = 3600
+HTTPX_TIMEOUT_CLI = 3600
 
-# httpx per-host settings (passed as CLI flags)
+# httpx per-run settings
 HTTPX_THREADS      = 50
-HTTPX_HOST_TIMEOUT = 10    # seconds per host
-HTTPX_RATE_LIMIT   = 150   # requests/second
+HTTPX_HOST_TIMEOUT = 10
+HTTPX_RATE_LIMIT   = 150
 
-# High-value keyword list — any subdomain matching one of these gets flagged
+# ── High-value keyword taxonomy ──────────────────────────────────────────────
+# Any subdomain whose hostname contains one or more of these tokens is flagged.
 HIGH_VALUE_KEYWORDS: list[str] = [
     "admin", "administrator", "manage", "management", "manager",
     "dev", "develop", "development", "developer",
@@ -84,57 +93,24 @@ HIGH_VALUE_KEYWORDS: list[str] = [
     "infra", "infrastructure", "deploy", "deployment", "cd", "ci",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Step 1 — Load targets from part files
-# ---------------------------------------------------------------------------
-def load_part_targets(part_numbers: list[int]) -> list[str]:
-    """
-    Read targets from the pre-split part files for the given part numbers.
-    Returns a deduplicated, flat list of all targets across those parts.
-
-    Developer: Ahmed Wael
-    """
-    all_targets: list[str] = []
-    seen: set[str] = set()
-
-    for num in part_numbers:
-        part_file = PARTS_DIR / f"part_{num:02d}.txt"
-        if not part_file.exists():
-            log.warning("Part file not found: %s  — skipping.", part_file)
-            continue
-
-        lines = [
-            l.strip().lower()
-            for l in part_file.read_text(encoding="utf-8").splitlines()
-            if l.strip() and not l.strip().startswith("#")
-        ]
-        before = len(all_targets)
-        for line in lines:
-            if line not in seen:
-                seen.add(line)
-                all_targets.append(line)
-
-        added = len(all_targets) - before
-        log.info("Part %02d loaded: %d targets  (%s)", num, added, part_file)
-
-    log.info("Total targets loaded from parts %s: %d", part_numbers, len(all_targets))
-    return all_targets
+# Subset considered CRITICAL priority (known sensitive attack surfaces)
+CRITICAL_KEYWORDS: frozenset[str] = frozenset([
+    "admin", "administrator", "phpmyadmin", "adminer",
+    "cpanel", "whm", "webmin", "plesk",
+    "jenkins", "gitlab", "grafana", "kibana",
+    "confluence", "jira", "sonar",
+])
 
 
+# ===========================================================================
+# Utility helpers
+# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Duration formatter  (shared by progress ticker and summary lines)
-# ---------------------------------------------------------------------------
 def _fmt_duration(seconds: float) -> str:
     """
-    Convert a raw second count into a compact, human-readable string.
+    Convert raw seconds to a compact, human-readable duration string.
 
-    Examples:
-        3661  → "1h 01m 01s"
-        90    → "1m 30s"
-        45    → "45s"
-        0.4   → "<1s"
+    Examples:  3661 → "1h 01m 01s" | 90 → "1m 30s" | 5 → "5s" | 0.3 → "<1s"
 
     Developer: Ahmed Wael
     """
@@ -150,9 +126,10 @@ def _fmt_duration(seconds: float) -> str:
     return f"{s}s"
 
 
-# ---------------------------------------------------------------------------
-# Streaming subprocess helper  (with generic, dynamic progress tracking)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Streaming subprocess helper  (live output + progress ticker)
+# ===========================================================================
+
 def _stream_subprocess(
     cmd: list[str],
     timeout_secs: int,
@@ -162,57 +139,19 @@ def _stream_subprocess(
     progress_every: float = 30.0,
 ) -> tuple[int, list[str]]:
     """
-    Execute *cmd* via Popen and stream **both** stdout and stderr line-by-line
-    to the console in real-time, flushing after every line so GitHub Actions
-    shows live output instead of a silent freeze.
+    Execute *cmd* via Popen and stream stdout + stderr line-by-line in
+    real-time so GitHub Actions never shows a frozen log.
 
-    Additionally, a background **progress ticker** thread fires every
-    *progress_every* seconds and prints a dynamic status line computed
-    entirely from the actual runtime state — no hardcoding, no assumptions.
-
-    Parameters
-    ----------
-    cmd            : shell command as a list of strings.
-    timeout_secs   : hard upper bound; process is killed if exceeded.
-    label          : short name shown in every log prefix, e.g. "subfinder".
-    total_input    : how many items were sent into the tool.
-                     Detected automatically from the caller and forwarded here
-                     so the ticker can compute a meaningful denominator.
-                     Set to 0 to suppress denominator-based stats.
-    progress_mode  : controls which progress formula is used.
-        "discover"  — output lines are RESULTS (subdomains found), not
-                      consumed inputs.  Reports discovery rate + elapsed time.
-                      ETA is shown as "indeterminate" because the final
-                      result count is unknown before the tool finishes.
-                      Used for subfinder.
-        "probe"     — output lines ≈ ITEMS PROCESSED (one JSON per host).
-                      Reports processed/total, percentage, and a real ETA
-                      derived from the live throughput rate.
-                      Used for httpx.
-    progress_every : seconds between progress-ticker log lines (default 30).
+    A background progress-ticker thread fires every *progress_every* seconds
+    and prints a dynamic snapshot — percentage + ETA for probe mode,
+    discovery-rate + timeout headroom for discover mode.
 
     Threading model
     ---------------
-      Main thread      — reads proc.stdout line-by-line; each line is
-                         appended to stdout_lines and flushed to console.
-      stderr daemon    — drains proc.stderr concurrently to prevent pipe
-                         deadlock when stdout consumes the OS pipe buffer.
-      Watchdog daemon  — armed with *timeout_secs*; kills proc if it does
-                         not finish in time, which collapses the stdout
-                         iterator and unblocks the main thread.
-      Ticker daemon    — wakes every *progress_every* seconds and prints a
-                         dynamic progress snapshot using len(stdout_lines),
-                         which is safe to read from a secondary thread under
-                         CPython's GIL (list.append + len are atomic).
-
-    Returns
-    -------
-    (returncode, stdout_lines)
-
-    Raises
-    ------
-    subprocess.TimeoutExpired — if the watchdog fires.
-    FileNotFoundError         — if the binary is not on PATH.
+      Main thread   — reads proc.stdout, appends to stdout_lines, flushes.
+      Stderr daemon — drains proc.stderr so the OS pipe never deadlocks.
+      Watchdog      — kills proc after *timeout_secs* if proc_done isn't set.
+      Ticker        — wakes every *progress_every* seconds, logs progress.
 
     Developer: Ahmed Wael
     """
@@ -221,104 +160,72 @@ def _stream_subprocess(
     proc_done  = threading.Event()
     start_time = time.monotonic()
 
-    # ── Spawn the process ──────────────────────────────────────────────────────
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1,          # line-buffered in text mode → each newline flushes
+        bufsize=1,
         encoding="utf-8",
         errors="ignore",
     )
 
-    # ── Watchdog daemon ────────────────────────────────────────────────────────
+    # ── Watchdog ──────────────────────────────────────────────────────────────
     def _watchdog() -> None:
-        """Kill proc if it hasn't finished within timeout_secs."""
         if not proc_done.wait(timeout=timeout_secs):
-            log.warning(
-                "[%s] ⏱ Hard timeout (%s) reached — killing process.",
-                label, _fmt_duration(timeout_secs),
-            )
+            log.warning("[%s] ⏱ Hard timeout (%s) — killing process.", label, _fmt_duration(timeout_secs))
             timed_out.set()
             proc.kill()
 
-    wd = threading.Thread(target=_watchdog, daemon=True, name=f"{label}-watchdog")
-    wd.start()
+    threading.Thread(target=_watchdog, daemon=True, name=f"{label}-watchdog").start()
 
-    # ── Stderr drain daemon ────────────────────────────────────────────────────
+    # ── Stderr drain ──────────────────────────────────────────────────────────
     def _drain_stderr() -> None:
-        """Stream stderr live without blocking the stdout reader."""
         for raw in proc.stderr:
             line = raw.rstrip("\n")
             if line:
                 sys.stderr.write(f"  [{label}][stderr] {line}\n")
                 sys.stderr.flush()
 
-    se = threading.Thread(target=_drain_stderr, daemon=True, name=f"{label}-stderr")
-    se.start()
+    threading.Thread(target=_drain_stderr, daemon=True, name=f"{label}-stderr").start()
 
-    # ── Progress ticker daemon ─────────────────────────────────────────────────
+    # ── Progress ticker ───────────────────────────────────────────────────────
     def _ticker() -> None:
         """
-        Periodically log a dynamic progress snapshot.
-
-        All values are computed at tick-time from live state — no estimation
-        is baked in at startup.  The formula adapts automatically to whatever
-        total_input and output count happen to be at each tick, making it
-        fully generic across any batch size.
+        Generic progress ticker — all values computed from live runtime state.
+        No hardcoding: total_input is injected by the caller at invocation time
+        from the actual count of loaded targets or subdomains.
 
         Developer: Ahmed Wael
         """
         tick = 0
         while not proc_done.wait(timeout=progress_every):
             tick += 1
-            elapsed  = time.monotonic() - start_time
-            count    = len(stdout_lines)   # live read — GIL-safe in CPython
-            rate_ps  = count / elapsed if elapsed > 0 else 0.0  # items/sec
-            rate_pm  = rate_ps * 60                              # items/min
+            elapsed = time.monotonic() - start_time
+            count   = len(stdout_lines)           # GIL-safe list len
+            rate_ps = count / elapsed if elapsed > 0 else 0.0
+            rate_pm = rate_ps * 60
 
             if progress_mode == "probe" and total_input > 0:
-                # ── PROBE mode: output line ≈ one host processed ───────────
                 pct      = min(count / total_input * 100.0, 100.0)
                 remain   = max(total_input - count, 0)
                 eta_secs = remain / rate_ps if rate_ps > 0 else None
-                eta_str  = _fmt_duration(eta_secs) if eta_secs is not None else "calculating…"
-
+                eta_str  = _fmt_duration(eta_secs) if eta_secs else "calculating…"
                 log.info(
-                    "[%s] ⏳ Tick #%d | Elapsed: %s | "
-                    "Probed: %d / %d  (%.1f%%) | "
-                    "Rate: %.1f hosts/min | ETA: %s",
-                    label, tick,
-                    _fmt_duration(elapsed),
-                    count, total_input, pct,
-                    rate_pm,
-                    eta_str,
+                    "[%s] ⏳ Tick #%d | Elapsed: %s | Probed: %d/%d (%.1f%%) | Rate: %.1f/min | ETA: %s",
+                    label, tick, _fmt_duration(elapsed), count, total_input, pct, rate_pm, eta_str,
                 )
-
             else:
-                # ── DISCOVER mode: output lines are results, not consumed inputs ──
-                # ETA is inherently indeterminate (we don't know the final count),
-                # so we show discovery rate and hard-timeout headroom instead.
-                timeout_remaining = max(timeout_secs - elapsed, 0)
-                context = (
-                    f" (from {total_input} targets)" if total_input > 0 else ""
-                )
+                ctx = f" (from {total_input} targets)" if total_input > 0 else ""
                 log.info(
-                    "[%s] ⏳ Tick #%d | Elapsed: %s | "
-                    "Found: %d subdomains%s | "
-                    "Rate: %.1f/min | Timeout in: %s",
-                    label, tick,
-                    _fmt_duration(elapsed),
-                    count, context,
-                    rate_pm,
-                    _fmt_duration(timeout_remaining),
+                    "[%s] ⏳ Tick #%d | Elapsed: %s | Found: %d subdomains%s | Rate: %.1f/min | Timeout in: %s",
+                    label, tick, _fmt_duration(elapsed), count, ctx, rate_pm,
+                    _fmt_duration(max(timeout_secs - elapsed, 0)),
                 )
 
-    tk = threading.Thread(target=_ticker, daemon=True, name=f"{label}-ticker")
-    tk.start()
+    threading.Thread(target=_ticker, daemon=True, name=f"{label}-ticker").start()
 
-    # ── Main thread: stream stdout line-by-line ────────────────────────────────
+    # ── Main thread: stream stdout ────────────────────────────────────────────
     for raw in proc.stdout:
         line = raw.rstrip("\n")
         if line:
@@ -326,10 +233,8 @@ def _stream_subprocess(
             sys.stdout.write(f"  [{label}] {line}\n")
             sys.stdout.flush()
 
-    # stdout exhausted — wait for the process to fully exit
     proc.wait()
-    proc_done.set()     # unblocks watchdog + ticker (they check this event)
-    se.join(timeout=5)  # give stderr thread a moment to flush final output
+    proc_done.set()
 
     if timed_out.is_set():
         raise subprocess.TimeoutExpired(cmd, timeout_secs)
@@ -337,109 +242,123 @@ def _stream_subprocess(
     return proc.returncode, stdout_lines
 
 
-# ---------------------------------------------------------------------------
-# Step 2 — Run subfinder
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Step 1 — Load targets from part files
+# ===========================================================================
+
+def load_part_targets(part_numbers: list[int]) -> list[str]:
+    """
+    Read and deduplicate targets from the pre-split part files.
+
+    Developer: Ahmed Wael
+    """
+    all_targets: list[str] = []
+    seen: set[str] = set()
+
+    for num in part_numbers:
+        part_file = PARTS_DIR / f"part_{num:02d}.txt"
+        if not part_file.exists():
+            log.warning("Part file not found: %s  — skipping.", part_file)
+            continue
+
+        lines = [
+            ln.strip().lower()
+            for ln in part_file.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        before = len(all_targets)
+        for ln in lines:
+            if ln not in seen:
+                seen.add(ln)
+                all_targets.append(ln)
+
+        log.info("Part %02d: %d targets  (%s)", num, len(all_targets) - before, part_file)
+
+    log.info("Total unique targets across parts %s: %d", part_numbers, len(all_targets))
+    return all_targets
+
+
+# ===========================================================================
+# Step 2 — Subfinder  (live-streaming, discover mode)
+# ===========================================================================
+
 def run_subfinder(targets: list[str]) -> set[str]:
     """
-    Write *targets* to a temp file and invoke subfinder (silent / all-sources).
-
-    stdout is streamed line-by-line to the GitHub Actions log in real-time via
-    _stream_subprocess(), so each discovered subdomain appears immediately
-    rather than only after the full run completes.
-
-    Returns the full set of discovered subdomains (lower-cased).
+    Write targets to a temp file and invoke subfinder (silent / all-sources).
+    Each discovered subdomain streams to the log as it is found.
 
     Developer: Ahmed Wael
     """
     if not targets:
-        log.warning("No targets provided to subfinder. Skipping.")
+        log.warning("[subfinder] No targets provided. Skipping.")
         return set()
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, prefix="sf_targets_"
-    ) as tf:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, prefix="sf_targets_") as tf:
         tf.write("\n".join(targets))
         targets_path = tf.name
 
-    log.info("=" * 55)
+    log.info("─" * 55)
     log.info("[subfinder] Starting — %d targets", len(targets))
-    log.info("=" * 55)
+    log.info("─" * 55)
 
     try:
-        returncode, stdout_lines = _stream_subprocess(
-            cmd=[
-                "subfinder",
-                "-dL",    targets_path,
-                "-silent",         # one subdomain per stdout line, no banners
-                "-all",            # enable all passive sources
-            ],
+        rc, lines = _stream_subprocess(
+            cmd=["subfinder", "-dL", targets_path, "-silent", "-all"],
             timeout_secs=SUBFINDER_TIMEOUT,
             label="subfinder",
-            total_input=len(targets),    # forwarded to ticker for context display
-            progress_mode="discover",    # output lines = results, not consumed inputs
-            progress_every=30.0,         # tick every 30 s
+            total_input=len(targets),
+            progress_mode="discover",
+            progress_every=30.0,
         )
-
-        if returncode != 0:
-            log.warning("[subfinder] Exited with non-zero code: %d", returncode)
-
-        # stdout_lines already contains exactly the discovered subdomains
-        discovered = {ln.strip().lower() for ln in stdout_lines if ln.strip()}
-        log.info("[subfinder] Finished — %d unique subdomains discovered.", len(discovered))
+        if rc != 0:
+            log.warning("[subfinder] Non-zero exit: %d", rc)
+        discovered = {ln.strip().lower() for ln in lines if ln.strip()}
+        log.info("[subfinder] Done — %d unique subdomains discovered.", len(discovered))
         return discovered
-
     except FileNotFoundError:
-        log.error("[subfinder] Binary not found. Ensure it is installed and on PATH.")
+        log.error("[subfinder] Binary not found. Is it installed and on PATH?")
         sys.exit(1)
     except subprocess.TimeoutExpired:
-        log.error("[subfinder] Hard timeout (%ds) reached — process killed.", SUBFINDER_TIMEOUT)
+        log.error("[subfinder] Timed out after %s.", _fmt_duration(SUBFINDER_TIMEOUT))
         sys.exit(1)
     finally:
         Path(targets_path).unlink(missing_ok=True)
 
 
+# ===========================================================================
+# Step 3 — httpx  (live-streaming JSON, probe mode)
+# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Step 3 — Run httpx
-# ---------------------------------------------------------------------------
 def run_httpx(subdomains: set[str]) -> list[dict]:
     """
-    Probe *subdomains* with httpx to identify active HTTP/HTTPS hosts.
-    Returns a list of result dicts (one per active host).
+    Probe *subdomains* with httpx; each active host's JSON result streams live.
+    Returns a list of raw JSON result dicts (one per responding host).
 
-    Gracefully degrades if httpx is not installed — returns empty list.
+    Gracefully degrades to empty list if httpx is not installed.
 
     Developer: Ahmed Wael
     """
     if not subdomains:
-        log.info("No subdomains to probe with httpx.")
+        log.info("[httpx] No subdomains to probe.")
         return []
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, prefix="hx_input_"
-    ) as tf:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, prefix="hx_input_") as tf:
         tf.write("\n".join(sorted(subdomains)))
         input_path = tf.name
 
-    log.info("=" * 55)
+    log.info("─" * 55)
     log.info("[httpx] Starting — %d subdomains  (threads=%d)", len(subdomains), HTTPX_THREADS)
-    log.info("=" * 55)
+    log.info("─" * 55)
 
     results: list[dict] = []
-
     try:
-        # httpx writes one JSON object per line to stdout when -json is used
-        # without an -o flag.  _stream_subprocess streams each line live so
-        # GitHub Actions shows active hosts as they are probed in real-time.
-        returncode, stdout_lines = _stream_subprocess(
+        rc, lines = _stream_subprocess(
             cmd=[
                 "httpx",
                 "-l",             input_path,
-                "-json",                          # one JSON obj per line → stdout
-                # NO -silent so httpx can emit progress to stderr if desired
-                "-sc",                            # embed status code in JSON
-                "-title",                         # embed page title in JSON
+                "-json",
+                "-sc",
+                "-title",
                 "-follow-redirects",
                 "-prefer-https",
                 "-threads",       str(HTTPX_THREADS),
@@ -449,84 +368,71 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
             ],
             timeout_secs=HTTPX_TIMEOUT_CLI,
             label="httpx",
-            total_input=len(subdomains),   # dynamic — exact count from subfinder output
-            progress_mode="probe",         # each stdout line = one host processed → real %
-            progress_every=30.0,           # tick every 30 s
+            total_input=len(subdomains),
+            progress_mode="probe",
+            progress_every=30.0,
         )
+        if rc != 0:
+            log.warning("[httpx] Non-zero exit: %d", rc)
 
-        if returncode != 0:
-            log.warning("[httpx] Exited with non-zero code: %d", returncode)
-
-        # Parse JSON lines collected from stdout
-        for line in stdout_lines:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
             try:
                 results.append(json.loads(line))
             except json.JSONDecodeError:
-                continue   # skip any non-JSON progress lines
+                continue
 
-        log.info("[httpx] Finished — %d active hosts confirmed.", len(results))
-
+        log.info("[httpx] Done — %d active hosts confirmed.", len(results))
     except FileNotFoundError:
-        log.warning(
-            "[httpx] Binary not found — HTTP probing phase skipped. "
-            "Install: go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
-        )
+        log.warning("[httpx] Binary not found — probing skipped. "
+                    "Install: go install github.com/projectdiscovery/httpx/cmd/httpx@latest")
     except subprocess.TimeoutExpired:
-        log.error("[httpx] Hard timeout (%ds) reached — process killed.", HTTPX_TIMEOUT_CLI)
+        log.error("[httpx] Timed out after %s.", _fmt_duration(HTTPX_TIMEOUT_CLI))
     finally:
         Path(input_path).unlink(missing_ok=True)
 
     return results
 
 
+# ===========================================================================
+# Step 4 — Normalise httpx results
+# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Step 4 — Parse httpx results
-# ---------------------------------------------------------------------------
 def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
     """
-    Normalise each httpx JSON result into a clean, consistent dict.
+    Normalise raw httpx JSON objects into a consistent dict schema.
 
-    Returned keys per host:
-        host        — original input domain
-        url         — final resolved URL
-        status_code — integer HTTP status code
-        title       — page title string (empty string if absent)
-        server      — webserver header value (empty string if absent)
+    Returned keys: host, url, status_code, title, server
 
     Developer: Ahmed Wael
     """
     parsed: list[dict] = []
     for item in raw_results:
         host = (item.get("input") or item.get("host") or "").strip().lower()
-        # Strip scheme if the input field contains a URL
         if "://" in host:
             host = host.split("://", 1)[1].rstrip("/")
         if not host:
             continue
-
-        parsed.append(
-            {
-                "host":        host,
-                "url":         item.get("url", ""),
-                "status_code": item.get("status-code", 0),
-                "title":       (item.get("title") or "").strip(),
-                "server":      (item.get("webserver") or "").strip(),
-            }
-        )
+        parsed.append({
+            "host":        host,
+            "url":         item.get("url", ""),
+            "status_code": item.get("status-code", 0),
+            "title":       (item.get("title") or "").strip(),
+            "server":      (item.get("webserver") or "").strip(),
+        })
     return parsed
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Step 5 — Baseline management
-# ---------------------------------------------------------------------------
+# ===========================================================================
+
 def load_baseline(path: Path) -> set[str]:
-    """Read the persistent baseline into a set; return empty set if absent."""
+    """Load persistent baseline into a set. Returns empty set if file absent."""
     if not path.exists():
-        log.info("No baseline file found at '%s'. Starting fresh.", path)
+        log.info("No baseline file at '%s'. Starting fresh.", path)
         return set()
     entries = {
         ln.strip().lower()
@@ -537,436 +443,514 @@ def load_baseline(path: Path) -> set[str]:
     return entries
 
 
-def update_baseline(
-    path: Path, new_subs: set[str], baseline_subs: set[str]
-) -> None:
-    """Merge *new_subs* into *baseline_subs* and write the result back to disk."""
-    merged = baseline_subs | new_subs
+def update_baseline(path: Path, new_subs: set[str], existing: set[str]) -> None:
+    """Merge *new_subs* into *existing*, write sorted to *path*."""
+    merged = existing | new_subs
     path.write_text(
-        "# BugBounty-Recon baseline — auto-managed by main.py  |  Developer: Ahmed Wael\n"
-        + "\n".join(sorted(merged))
-        + "\n",
+        "# BugBounty-Recon baseline — auto-managed by main.py\n"
+        "# Developer: Ahmed Wael\n"
+        + "\n".join(sorted(merged)) + "\n",
         encoding="utf-8",
     )
-    log.info(
-        "Baseline updated: %d total entries (+%d new).", len(merged), len(new_subs)
-    )
+    log.info("Baseline updated: %d total (+%d new).", len(merged), len(new_subs))
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Step 6 — Diff
-# ---------------------------------------------------------------------------
+# ===========================================================================
+
 def diff_subdomains(current: set[str], baseline: set[str]) -> set[str]:
-    """Return subdomains present in *current* but absent from *baseline*."""
+    """Return subdomains in *current* but absent from *baseline*."""
     new_subs = current - baseline
-    log.info(
-        "Diff: %d current | %d baseline | %d NEW",
-        len(current),
-        len(baseline),
-        len(new_subs),
-    )
+    log.info("Diff: %d current | %d baseline | %d NEW", len(current), len(baseline), len(new_subs))
     return new_subs
 
 
-# ---------------------------------------------------------------------------
-# Step 7 — Triage high-value targets
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Step 7 — High-value triage with priority ranking
+# ===========================================================================
+
+def _get_priority(host_info: dict) -> str:
+    """
+    Assign a three-tier severity label to a flagged host.
+
+    CRITICAL — matched a known high-impact keyword AND serves a live 200 response.
+    HIGH     — matched a critical keyword (any status) or 200 with any HV keyword.
+    MEDIUM   — any other HV keyword match.
+
+    Developer: Ahmed Wael
+    """
+    kws  = {kw.lower() for kw in host_info.get("keywords", [])}
+    code = host_info.get("status_code", 0)
+    crit = bool(kws & CRITICAL_KEYWORDS)
+
+    if crit and code == 200:
+        return "CRITICAL"
+    if crit or code == 200:
+        return "HIGH"
+    return "MEDIUM"
+
+
 def triage_high_value(probed_hosts: list[dict]) -> list[dict]:
     """
-    Filter *probed_hosts* for entries whose hostname contains at least one
-    HIGH_VALUE_KEYWORDS token (case-insensitive substring match).
+    Filter *probed_hosts* for high-value keyword matches, enrich with priority,
+    and return sorted CRITICAL → HIGH → MEDIUM, then by status code.
 
     Developer: Ahmed Wael
     """
     flagged: list[dict] = []
-    for host_info in probed_hosts:
-        host_lower = host_info["host"].lower()
-        matched_keywords = [kw for kw in HIGH_VALUE_KEYWORDS if kw in host_lower]
-        if matched_keywords:
-            flagged.append({**host_info, "keywords": matched_keywords})
-    log.info(
-        "High-value triage: %d / %d active hosts flagged.",
-        len(flagged),
-        len(probed_hosts),
-    )
+    for h in probed_hosts:
+        matched = [kw for kw in HIGH_VALUE_KEYWORDS if kw in h["host"].lower()]
+        if matched:
+            enriched = {**h, "keywords": matched}
+            enriched["priority"] = _get_priority(enriched)
+            flagged.append(enriched)
+
+    _order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
+    flagged.sort(key=lambda x: (_order.get(x.get("priority", "MEDIUM"), 2), -x.get("status_code", 0)))
+    log.info("High-value triage: %d / %d active hosts flagged.", len(flagged), len(probed_hosts))
     return flagged
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Step 8 — HTML report generation
-# ---------------------------------------------------------------------------
-def _status_badge(code: int) -> str:
-    """Return an inline-styled HTML badge coloured by HTTP status family."""
-    if code == 0:
-        colour, bg = "#718096", "#EDF2F7"
-    elif 200 <= code < 300:
-        colour, bg = "#276749", "#C6F6D5"
-    elif 300 <= code < 400:
-        colour, bg = "#744210", "#FEFCBF"
-    elif 400 <= code < 500:
-        colour, bg = "#742A2A", "#FED7D7"
-    else:
-        colour, bg = "#553C9A", "#E9D8FD"
+# ===========================================================================
 
+# ── Inline badge helpers ──────────────────────────────────────────────────────
+
+def _status_badge(code: int) -> str:
+    """Colour-coded HTTP status badge (inline CSS for email compatibility)."""
+    if code == 0:
+        clr, bg = "#6b7280", "#f3f4f6"
+    elif 200 <= code < 300:
+        clr, bg = "#065f46", "#d1fae5"
+    elif 300 <= code < 400:
+        clr, bg = "#92400e", "#fef3c7"
+    elif 400 <= code < 500:
+        clr, bg = "#991b1b", "#fee2e2"
+    else:
+        clr, bg = "#5b21b6", "#ede9fe"
     label = str(code) if code else "N/A"
     return (
-        f'<span style="display:inline-block;padding:2px 8px;border-radius:12px;'
-        f'font-size:12px;font-weight:700;color:{colour};background:{bg};">'
-        f"{label}</span>"
+        f'<span style="display:inline-block;padding:2px 10px;border-radius:20px;'
+        f'font-size:12px;font-weight:700;color:{clr};background:{bg};">{label}</span>'
+    )
+
+
+def _priority_badge(priority: str) -> str:
+    """Severity-tier badge for high-value targets."""
+    styles = {
+        "CRITICAL": ("#fff", "#dc2626", "⚠ CRITICAL"),
+        "HIGH":     ("#fff", "#ea580c", "↑ HIGH"),
+        "MEDIUM":   ("#1c1917", "#f59e0b", "▲ MEDIUM"),
+    }
+    fg, bg, label = styles.get(priority, ("#1c1917", "#f59e0b", "▲ MEDIUM"))
+    return (
+        f'<span style="display:inline-block;padding:2px 10px;border-radius:4px;'
+        f'font-size:11px;font-weight:800;letter-spacing:0.6px;'
+        f'color:{fg};background:{bg};">{label}</span>'
     )
 
 
 def _keyword_tags(keywords: list[str]) -> str:
-    """Render a list of keyword strings as small coloured HTML tags."""
-    parts = []
-    for kw in keywords[:5]:  # cap at 5 tags per row
-        parts.append(
-            f'<span style="display:inline-block;margin:1px 2px;padding:1px 6px;'
-            f'border-radius:10px;font-size:11px;font-weight:600;'
-            f'color:#c05621;background:#FEEBCB;">{escape(kw)}</span>'
+    """Render matched keyword tokens as small inline pills."""
+    tags = []
+    for kw in keywords[:6]:
+        tags.append(
+            f'<span style="display:inline-block;margin:1px 2px;padding:1px 7px;'
+            f'border-radius:20px;font-size:11px;font-weight:600;'
+            f'color:#92400e;background:#fef3c7;">{escape(kw)}</span>'
         )
-    return " ".join(parts)
+    return "".join(tags)
 
 
-def generate_html_report(
-    new_subs: set[str],
-    active_hosts: list[dict],
-    high_value_targets: list[dict],
-    parts_processed: list[int],
-    run_timestamp: str,
-) -> str:
-    """
-    Build a fully self-contained, responsive HTML email report.
+# ── Section builders ──────────────────────────────────────────────────────────
 
-    Developer: Ahmed Wael
-    Report generated by: BugBounty-Recon  |  Developed by Ahmed Wael
-    """
-    total_new    = len(new_subs)
-    total_active = len(active_hosts)
-    total_hv     = len(high_value_targets)
-    parts_label  = ", ".join(f"Part {p:02d}" for p in parts_processed)
+def _section_header(icon: str, title: str, count: int, bg: str, fg: str = "#fff") -> str:
+    return f"""
+    <tr>
+      <td style="background:{bg};padding:14px 20px;border-radius:10px 10px 0 0;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="font-size:16px;font-weight:700;color:{fg};">
+              {icon} {escape(title)}
+            </td>
+            <td align="right">
+              <span style="background:rgba(255,255,255,0.2);color:{fg};
+                           font-size:13px;font-weight:700;padding:3px 12px;
+                           border-radius:20px;">{count:,}</span>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>"""
 
-    # ── Stats cards ────────────────────────────────────────────────────────
-    def stat_card(value: str, label: str, bg: str, icon: str) -> str:
-        return f"""
-        <td width="33%" align="center" style="padding:8px;">
-          <div style="background:{bg};border-radius:12px;padding:20px 10px;">
-            <div style="font-size:28px;">{icon}</div>
-            <div style="font-size:32px;font-weight:800;color:#1a202c;margin:4px 0;">{value}</div>
-            <div style="font-size:12px;color:#718096;font-weight:600;text-transform:uppercase;
-                        letter-spacing:0.5px;">{label}</div>
-          </div>
-        </td>"""
 
-    # ── Active-hosts table rows ────────────────────────────────────────────
-    table_rows = ""
-    if active_hosts:
-        for h in sorted(active_hosts, key=lambda x: x.get("status_code", 0)):
-            row_bg    = "#fffbeb" if any(h["host"] == hv["host"] for hv in high_value_targets) else "#ffffff"
-            badge     = _status_badge(h.get("status_code", 0))
-            hv_match  = next((hv for hv in high_value_targets if hv["host"] == h["host"]), None)
-            tags_html = _keyword_tags(hv_match["keywords"]) if hv_match else ""
-            flag_icon = "🚨 " if hv_match else ""
-
-            table_rows += f"""
-            <tr style="background:{row_bg};border-bottom:1px solid #e2e8f0;">
-              <td style="padding:10px 12px;font-size:13px;color:#2d3748;word-break:break-all;">
-                {flag_icon}<a href="https://{escape(h['host'])}" style="color:#2b6cb0;text-decoration:none;">
-                {escape(h['host'])}</a>
-              </td>
-              <td style="padding:10px 12px;text-align:center;">{badge}</td>
-              <td style="padding:10px 12px;font-size:12px;color:#4a5568;max-width:200px;
-                         overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                {escape(h.get("title", "") or "—")}
-              </td>
-              <td style="padding:10px 12px;">{tags_html}</td>
-            </tr>"""
-    else:
-        table_rows = """
-            <tr>
-              <td colspan="4" style="padding:24px;text-align:center;color:#a0aec0;font-style:italic;">
-                No active HTTP hosts detected in this batch.
-              </td>
-            </tr>"""
-
-    # ── DNS-only new subs (not in active_hosts) ────────────────────────────
-    active_host_names = {h["host"] for h in active_hosts}
-    dns_only = sorted(new_subs - active_host_names)
-    dns_rows = ""
-    if dns_only:
-        dns_rows = "".join(
-            f'<tr style="border-bottom:1px solid #edf2f7;">'
-            f'<td style="padding:6px 12px;font-size:12px;color:#4a5568;">{escape(d)}</td>'
-            f"</tr>"
-            for d in dns_only[:200]  # cap at 200 for email size
-        )
-        if len(dns_only) > 200:
-            dns_rows += (
-                f'<tr><td style="padding:6px 12px;font-size:12px;color:#a0aec0;'
-                f'font-style:italic;">… and {len(dns_only)-200} more (see baseline_subs.txt)</td></tr>'
-            )
-
-    # ── High-value section ─────────────────────────────────────────────────
-    hv_rows = ""
-    if high_value_targets:
-        for hv in sorted(high_value_targets, key=lambda x: x.get("status_code", 0)):
-            badge    = _status_badge(hv.get("status_code", 0))
-            tag_html = _keyword_tags(hv.get("keywords", []))
-            hv_rows += f"""
-              <tr style="border-bottom:1px solid #feebc8;">
-                <td style="padding:10px 12px;font-size:13px;color:#2d3748;word-break:break-all;">
-                  <a href="https://{escape(hv['host'])}" style="color:#c05621;font-weight:600;
-                     text-decoration:none;">🎯 {escape(hv['host'])}</a>
-                </td>
-                <td style="padding:10px 12px;text-align:center;">{badge}</td>
-                <td style="padding:10px 12px;font-size:12px;color:#4a5568;">
-                  {escape(hv.get("title", "") or "—")}
-                </td>
-                <td style="padding:10px 12px;">{tag_html}</td>
-              </tr>"""
-    else:
-        hv_rows = (
-            '<tr><td colspan="4" style="padding:20px;text-align:center;'
-            'color:#a0aec0;font-style:italic;">No high-value targets flagged in this batch.</td></tr>'
-        )
-
-    # ── Full HTML document ─────────────────────────────────────────────────
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-  <title>BugBounty-Recon Report — Ahmed Wael</title>
-</head>
-<body style="margin:0;padding:0;background:#f0f2f5;font-family:Arial,Helvetica,sans-serif;">
-
-<!-- ═══════════════════════════════════════════ HEADER ══ -->
+def _build_report_header(part_num: int, targets_count: int, run_ts: str) -> str:
+    return f"""
 <table width="100%" cellpadding="0" cellspacing="0"
-       style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);">
+       style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 55%,#0f172a 100%);">
   <tr>
-    <td align="center" style="padding:36px 24px 28px;">
-      <table cellpadding="0" cellspacing="0" style="max-width:680px;">
+    <td align="center" style="padding:40px 24px 32px;">
+      <table style="max-width:680px;" cellpadding="0" cellspacing="0">
         <tr>
           <td align="center">
-            <div style="display:inline-block;background:#e94560;border-radius:50%;
-                        width:54px;height:54px;line-height:54px;text-align:center;
-                        font-size:26px;margin-bottom:12px;">🔍</div>
-            <h1 style="margin:0;font-size:28px;font-weight:900;color:#ffffff;
+            <!-- Logo mark -->
+            <div style="width:56px;height:56px;border-radius:16px;
+                        background:linear-gradient(135deg,#6366f1,#8b5cf6);
+                        line-height:56px;text-align:center;font-size:28px;
+                        margin:0 auto 16px;box-shadow:0 4px 20px rgba(99,102,241,.4);">🔍</div>
+            <h1 style="margin:0;font-size:26px;font-weight:900;color:#f1f5f9;
                         letter-spacing:-0.5px;">BugBounty-Recon</h1>
-            <p style="margin:6px 0 0;font-size:15px;color:#a0aec0;">
-              Daily Reconnaissance Intelligence Report
+            <p style="margin:6px 0 0;font-size:14px;color:#94a3b8;">
+              Daily Intelligence Report &nbsp;·&nbsp;
+              <strong style="color:#818cf8;">Part {part_num:02d} / {TOTAL_PARTS}</strong>
             </p>
-            <p style="margin:6px 0 0;font-size:12px;color:#718096;">
-              Developed by <strong style="color:#e94560;">Ahmed Wael</strong>
-              &nbsp;·&nbsp; {escape(run_timestamp)}
-            </p>
-            <p style="margin:8px 0 0;font-size:12px;color:#4a5568;
-                       background:rgba(255,255,255,0.06);border-radius:20px;
-                       padding:4px 16px;display:inline-block;">
-              Processing: {escape(parts_label)}
+            <p style="margin:8px 0 0;font-size:12px;color:#64748b;">
+              {escape(run_ts)} &nbsp;·&nbsp;
+              {targets_count:,} targets processed &nbsp;·&nbsp;
+              Developed by <strong style="color:#a5b4fc;">Ahmed Wael</strong>
             </p>
           </td>
         </tr>
       </table>
     </td>
   </tr>
-</table>
+</table>"""
 
-<!-- ═══════════════════════════════════════════ STATS CARDS ══ -->
-<table width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;margin:24px auto 0;">
-  <tr>
-    {stat_card(str(total_new),    "New Subdomains",      "#ebf8ff", "🌐")}
-    {stat_card(str(total_active), "Active HTTP Hosts",   "#f0fff4", "✅")}
-    {stat_card(str(total_hv),     "High-Value Alerts",   "#fffaf0", "🚨")}
-  </tr>
-</table>
 
-<!-- ═══════════════════════════════════════════ ACTIVE HOSTS TABLE ══ -->
+def _build_stat_cards(
+    total_new: int, total_active: int, total_hv: int, baseline_total: int
+) -> str:
+    def _card(value: str, label: str, color: str, icon: str, sub: str = "") -> str:
+        return f"""
+        <td width="25%" style="padding:6px;">
+          <table width="100%" cellpadding="0" cellspacing="0"
+                 style="background:#fff;border-radius:12px;
+                        box-shadow:0 2px 12px rgba(0,0,0,0.07);
+                        border-top:4px solid {color};">
+            <tr>
+              <td align="center" style="padding:18px 8px 20px;">
+                <div style="font-size:24px;margin-bottom:6px;">{icon}</div>
+                <div style="font-size:32px;font-weight:900;color:#0f172a;
+                            letter-spacing:-1px;">{value}</div>
+                <div style="font-size:11px;color:#64748b;font-weight:700;
+                            text-transform:uppercase;letter-spacing:0.8px;
+                            margin-top:4px;">{label}</div>
+                {"<div style='font-size:10px;color:#94a3b8;margin-top:2px;'>" + sub + "</div>" if sub else ""}
+              </td>
+            </tr>
+          </table>
+        </td>"""
+
+    hv_color = "#dc2626" if total_hv > 0 else "#6b7280"
+    return f"""
 <table width="100%" cellpadding="0" cellspacing="0"
-       style="max-width:680px;margin:24px auto 0;background:#ffffff;
-              border-radius:16px;overflow:hidden;
-              box-shadow:0 2px 16px rgba(0,0,0,0.07);">
+       style="max-width:700px;margin:20px auto 0;">
   <tr>
-    <td style="background:#1a1a2e;padding:16px 20px;">
-      <h2 style="margin:0;font-size:16px;font-weight:700;color:#ffffff;">
-        ✅ New Active HTTP Hosts
-      </h2>
-      <p style="margin:4px 0 0;font-size:12px;color:#718096;">
-        Subdomains responding over HTTP/S in this batch run
-      </p>
-    </td>
+    {_card(f"{total_new:,}",    "New Subdomains",  "#6366f1", "🌐", "vs baseline")}
+    {_card(f"{total_active:,}", "Active HTTP",     "#10b981", "✅", "responded")}
+    {_card(f"{total_hv:,}",     "High-Value",      hv_color,  "🚨", "flagged")}
+    {_card(f"{baseline_total:,}", "Total Known",   "#94a3b8", "📚", "in baseline")}
   </tr>
+</table>"""
+
+
+def _build_hv_section(high_value: list[dict]) -> str:
+    if not high_value:
+        return ""
+
+    rows = ""
+    for hv in high_value:
+        priority = hv.get("priority", "MEDIUM")
+        row_bg   = {"CRITICAL": "#fff5f5", "HIGH": "#fff7ed", "MEDIUM": "#fffbeb"}.get(priority, "#fffbeb")
+        rows += f"""
+        <tr style="background:{row_bg};border-bottom:1px solid #fde8d8;">
+          <td style="padding:10px 14px;white-space:nowrap;">{_priority_badge(priority)}</td>
+          <td style="padding:10px 8px;font-size:13px;color:#1e293b;word-break:break-all;">
+            <a href="https://{escape(hv['host'])}" style="color:#dc2626;font-weight:600;
+               text-decoration:none;">🎯 {escape(hv['host'])}</a>
+          </td>
+          <td style="padding:10px 8px;text-align:center;white-space:nowrap;">{_status_badge(hv.get('status_code',0))}</td>
+          <td style="padding:10px 8px;font-size:12px;color:#475569;max-width:160px;
+                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            {escape(hv.get('title', '') or '—')}</td>
+          <td style="padding:10px 8px;">{_keyword_tags(hv.get('keywords', []))}</td>
+        </tr>"""
+
+    th = """<tr style="background:#fef2f2;border-bottom:2px solid #fca5a5;">
+      <th style="padding:10px 14px;font-size:11px;color:#991b1b;font-weight:700;
+                 text-transform:uppercase;text-align:left;white-space:nowrap;">Priority</th>
+      <th style="padding:10px 8px;font-size:11px;color:#991b1b;font-weight:700;
+                 text-transform:uppercase;text-align:left;">Hostname</th>
+      <th style="padding:10px 8px;font-size:11px;color:#991b1b;font-weight:700;
+                 text-transform:uppercase;text-align:center;">Status</th>
+      <th style="padding:10px 8px;font-size:11px;color:#991b1b;font-weight:700;
+                 text-transform:uppercase;text-align:left;">Title</th>
+      <th style="padding:10px 8px;font-size:11px;color:#991b1b;font-weight:700;
+                 text-transform:uppercase;text-align:left;">Keywords</th>
+    </tr>"""
+
+    return f"""
+<table width="100%" cellpadding="0" cellspacing="0"
+       style="max-width:700px;margin:24px auto 0;background:#fff;
+              border-radius:12px;overflow:hidden;
+              border:2px solid #fca5a5;
+              box-shadow:0 4px 20px rgba(220,38,38,.10);">
+  {_section_header("🚨", "High-Value Targets — Manual Inspection Required",
+                   len(high_value), "linear-gradient(90deg,#dc2626,#b91c1c)")}
   <tr>
     <td style="padding:0;">
       <table width="100%" cellpadding="0" cellspacing="0">
-        <thead>
-          <tr style="background:#f7fafc;border-bottom:2px solid #e2e8f0;">
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#718096;font-weight:700;text-transform:uppercase;">Hostname</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;
-                       color:#718096;font-weight:700;text-transform:uppercase;width:80px;">Status</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#718096;font-weight:700;text-transform:uppercase;width:200px;">Title</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#718096;font-weight:700;text-transform:uppercase;">Tags</th>
-          </tr>
-        </thead>
-        <tbody>
-          {table_rows}
-        </tbody>
+        <thead>{th}</thead>
+        <tbody>{rows}</tbody>
       </table>
     </td>
   </tr>
-</table>
+</table>"""
 
-<!-- ═══════════════════════════════════════════ HIGH-VALUE TARGETS ══ -->
+
+def _build_active_table(new_active: list[dict], high_value: list[dict]) -> str:
+    hv_hosts = {hv["host"] for hv in high_value}
+    cap = 250
+    capped = len(new_active) > cap
+    display = new_active[:cap]
+
+    if not display:
+        empty = """<tr><td colspan="4" style="padding:24px;text-align:center;
+                   color:#94a3b8;font-style:italic;">
+                   No active HTTP/S hosts detected in this batch.</td></tr>"""
+        rows = empty
+    else:
+        rows = ""
+        for h in sorted(display, key=lambda x: x.get("status_code", 0)):
+            is_hv   = h["host"] in hv_hosts
+            row_bg  = "#fefce8" if is_hv else ("#f8fafc" if display.index(h) % 2 == 0 else "#fff")
+            hv_icon = "⚡ " if is_hv else ""
+            rows += f"""
+        <tr style="background:{row_bg};border-bottom:1px solid #e2e8f0;">
+          <td style="padding:9px 14px;font-size:13px;color:#0f172a;word-break:break-all;">
+            {hv_icon}<a href="https://{escape(h['host'])}" style="color:#3730a3;text-decoration:none;">
+            {escape(h['host'])}</a>
+          </td>
+          <td style="padding:9px 8px;text-align:center;white-space:nowrap;">{_status_badge(h.get('status_code',0))}</td>
+          <td style="padding:9px 8px;font-size:12px;color:#475569;max-width:180px;
+                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            {escape(h.get('server', '') or '—')}</td>
+          <td style="padding:9px 8px;font-size:12px;color:#475569;max-width:200px;
+                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            {escape(h.get('title', '') or '—')}</td>
+        </tr>"""
+
+        if capped:
+            rows += f"""<tr><td colspan="4" style="padding:10px 14px;font-size:12px;
+                        color:#94a3b8;text-align:center;font-style:italic;">
+                        … and {len(new_active)-cap:,} more — see baseline_subs.txt</td></tr>"""
+
+    th = """<tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1;">
+      <th style="padding:10px 14px;font-size:11px;color:#475569;font-weight:700;
+                 text-transform:uppercase;text-align:left;">Hostname</th>
+      <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
+                 text-transform:uppercase;text-align:center;width:70px;">Status</th>
+      <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
+                 text-transform:uppercase;text-align:left;width:140px;">Server</th>
+      <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
+                 text-transform:uppercase;text-align:left;">Title</th>
+    </tr>"""
+
+    return f"""
 <table width="100%" cellpadding="0" cellspacing="0"
-       style="max-width:680px;margin:24px auto 0;background:#fff8f0;
-              border-radius:16px;overflow:hidden;border:2px solid #fbd38d;
-              box-shadow:0 2px 16px rgba(0,0,0,0.05);">
-  <tr>
-    <td style="background:linear-gradient(90deg,#c05621,#dd6b20);padding:16px 20px;">
-      <h2 style="margin:0;font-size:16px;font-weight:700;color:#ffffff;">
-        🚨 High-Value Targets — Manual Inspection Required
-      </h2>
-      <p style="margin:4px 0 0;font-size:12px;color:#fef3c7;">
-        Hosts matching sensitive keywords — review immediately
-      </p>
-    </td>
-  </tr>
+       style="max-width:700px;margin:24px auto 0;background:#fff;
+              border-radius:12px;overflow:hidden;
+              box-shadow:0 2px 12px rgba(0,0,0,0.07);">
+  {_section_header("✅", "New Active HTTP Hosts",
+                   len(new_active), "#059669")}
   <tr>
     <td style="padding:0;">
       <table width="100%" cellpadding="0" cellspacing="0">
-        <thead>
-          <tr style="background:#fffbeb;border-bottom:2px solid #fbd38d;">
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#92400e;font-weight:700;text-transform:uppercase;">Hostname</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;
-                       color:#92400e;font-weight:700;text-transform:uppercase;width:80px;">Status</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#92400e;font-weight:700;text-transform:uppercase;width:200px;">Title</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;
-                       color:#92400e;font-weight:700;text-transform:uppercase;">Keywords</th>
-          </tr>
-        </thead>
-        <tbody>
-          {hv_rows}
-        </tbody>
+        <thead>{th}</thead>
+        <tbody>{rows}</tbody>
       </table>
     </td>
   </tr>
-</table>
+</table>"""
 
-<!-- ═══════════════════════════════════════════ DNS-ONLY NEW SUBS ══ -->
-{"" if not dns_only else f"""
+
+def _build_dns_section(dns_only: list[str]) -> str:
+    if not dns_only:
+        return ""
+
+    cap = 400
+    display = dns_only[:cap]
+    pills = "".join(
+        f'<span style="display:inline-block;margin:3px 3px;padding:3px 10px;'
+        f'border-radius:20px;font-size:12px;color:#1e40af;'
+        f'background:#dbeafe;white-space:nowrap;">{escape(d)}</span>'
+        for d in display
+    )
+    overflow = (
+        f'<p style="margin:8px 0 0;font-size:12px;color:#94a3b8;font-style:italic;">'
+        f'… and {len(dns_only)-cap:,} more (see baseline_subs.txt)</p>'
+        if len(dns_only) > cap else ""
+    )
+
+    return f"""
 <table width="100%" cellpadding="0" cellspacing="0"
-       style="max-width:680px;margin:24px auto 0;background:#ffffff;
-              border-radius:16px;overflow:hidden;
-              box-shadow:0 2px 16px rgba(0,0,0,0.07);">
+       style="max-width:700px;margin:24px auto 0;background:#fff;
+              border-radius:12px;overflow:hidden;
+              box-shadow:0 2px 12px rgba(0,0,0,0.07);">
+  {_section_header("🌐", "New DNS Discoveries (no HTTP response)",
+                   len(dns_only), "#2563eb")}
   <tr>
-    <td style="background:#2d3748;padding:16px 20px;">
-      <h2 style="margin:0;font-size:16px;font-weight:700;color:#ffffff;">
-        🌐 DNS-Only New Subdomains (no HTTP response)
-      </h2>
-      <p style="margin:4px 0 0;font-size:12px;color:#a0aec0;">
-        Discovered by subfinder — not yet reachable over HTTP/S
-      </p>
+    <td style="padding:16px 18px;">
+      {pills}
+      {overflow}
     </td>
   </tr>
+</table>"""
+
+
+def _build_footer(part_num: int, run_ts: str) -> str:
+    return f"""
+<table width="100%" cellpadding="0" cellspacing="0"
+       style="max-width:700px;margin:24px auto 36px;">
   <tr>
-    <td>
+    <td style="border-top:2px solid #e2e8f0;padding:24px 0 0;">
       <table width="100%" cellpadding="0" cellspacing="0">
-        {dns_rows}
+        <tr>
+          <td>
+            <p style="margin:0;font-size:13px;font-weight:700;color:#0f172a;">
+              BugBounty-Recon
+            </p>
+            <p style="margin:4px 0 0;font-size:12px;color:#94a3b8;">
+              Reconnaissance Intelligence Report &nbsp;·&nbsp; Part {part_num:02d}/{TOTAL_PARTS}
+            </p>
+          </td>
+          <td align="right">
+            <p style="margin:0;font-size:12px;color:#64748b;">
+              Developed by <strong style="color:#6366f1;">Ahmed Wael</strong>
+            </p>
+            <p style="margin:4px 0 0;font-size:11px;color:#94a3b8;">
+              {escape(run_ts)} &nbsp;·&nbsp; GitHub Actions
+            </p>
+          </td>
+        </tr>
       </table>
-    </td>
-  </tr>
-</table>
-"""}
-
-<!-- ═══════════════════════════════════════════ FOOTER ══ -->
-<table width="100%" cellpadding="0" cellspacing="0"
-       style="max-width:680px;margin:24px auto 32px;">
-  <tr>
-    <td align="center" style="padding:20px;border-top:1px solid #e2e8f0;">
-      <p style="margin:0;font-size:13px;color:#718096;">
-        <strong style="color:#1a1a2e;">BugBounty-Recon</strong>
-        &nbsp;·&nbsp; Reconnaissance Report
-      </p>
-      <p style="margin:6px 0 0;font-size:12px;color:#a0aec0;">
-        Developed by <strong style="color:#e94560;">Ahmed Wael</strong>
-        &nbsp;·&nbsp; Generated automatically via GitHub Actions
-      </p>
-      <p style="margin:6px 0 0;font-size:11px;color:#cbd5e0;">
+      <p style="margin:14px 0 0;font-size:11px;color:#cbd5e1;text-align:center;">
         Stay ahead. Stay safe. Happy Hunting. 🎯
       </p>
     </td>
   </tr>
+</table>"""
+
+
+def generate_html_report(results: dict, baseline_total: int) -> str:
+    """
+    Compose a fully self-contained, responsive HTML email report from the
+    results dict produced by process_single_part().
+
+    Sections (in order):
+      1. Dark gradient header  — tool name, part info, timestamp, attribution
+      2. Metric cards          — new subs / active hosts / high-value / baseline
+      3. High-Value Targets    — priority-ranked table (CRITICAL → HIGH → MEDIUM)
+      4. New Active HTTP Hosts — status-coded table, capped at 250 rows
+      5. DNS-Only Discoveries  — pill display of non-HTTP new subdomains
+      6. Footer                — developer credit, timestamp
+
+    Developer: Ahmed Wael
+    """
+    part_num      = results["part_num"]
+    new_subs      = results["new_subs"]
+    new_active    = results["new_active"]
+    high_value    = results["high_value"]
+    targets_count = results["targets_count"]
+    run_ts        = results.get("run_timestamp", "")
+
+    active_hosts  = {h["host"] for h in new_active}
+    dns_only      = sorted(new_subs - active_hosts)
+
+    header  = _build_report_header(part_num, targets_count, run_ts)
+    cards   = _build_stat_cards(len(new_subs), len(new_active), len(high_value), baseline_total)
+    hv_sec  = _build_hv_section(high_value)
+    act_sec = _build_active_table(new_active, high_value)
+    dns_sec = _build_dns_section(dns_only)
+    footer  = _build_footer(part_num, run_ts)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>BugBounty-Recon Report — Part {part_num:02d} — Ahmed Wael</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
+
+{header}
+
+<table width="100%" cellpadding="0" cellspacing="0">
+  <tr><td align="center">
+    <table style="max-width:700px;width:100%;" cellpadding="0" cellspacing="0">
+      <tr><td>{cards}</td></tr>
+      <tr><td>{hv_sec}</td></tr>
+      <tr><td>{act_sec}</td></tr>
+      <tr><td>{dns_sec}</td></tr>
+      <tr><td>{footer}</td></tr>
+    </table>
+  </td></tr>
 </table>
 
 </body>
 </html>"""
 
-    return html
 
+# ===========================================================================
+# Step 9 — SMTP email dispatch
+# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Step 9 — Send email
-# ---------------------------------------------------------------------------
-def send_email_report(
-    html_body: str,
-    new_count: int,
-    active_count: int,
-    hv_count: int,
-    parts_processed: list[int],
-) -> None:
+def send_email_report(html_body: str, results: dict, baseline_total: int) -> None:
     """
-    Dispatch the HTML report via SMTP (STARTTLS).
+    Send the HTML report via SMTP (STARTTLS).
 
-    Required environment variables:
-        SMTP_EMAIL       — sender address (also used as SMTP login)
-        SMTP_PASSWORD    — app-specific password
-        RECIPIENT_EMAIL  — destination inbox
-
-    Optional:
-        SMTP_HOST        — default smtp.gmail.com
-        SMTP_PORT        — default 587
+    Required env vars : SMTP_EMAIL, SMTP_PASSWORD, RECIPIENT_EMAIL
+    Optional env vars : SMTP_HOST (default smtp.gmail.com), SMTP_PORT (default 587)
 
     Developer: Ahmed Wael
     """
-    smtp_email    = os.environ.get("SMTP_EMAIL", "").strip()
-    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
-    recipient     = os.environ.get("RECIPIENT_EMAIL", "").strip()
-    smtp_host     = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
-    smtp_port     = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_email = os.environ.get("SMTP_EMAIL", "").strip()
+    smtp_pass  = os.environ.get("SMTP_PASSWORD", "").strip()
+    recipient  = os.environ.get("RECIPIENT_EMAIL", "").strip()
+    smtp_host  = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+    smtp_port  = int(os.environ.get("SMTP_PORT", "587"))
 
-    if not all([smtp_email, smtp_password, recipient]):
-        log.warning(
-            "Email credentials incomplete (SMTP_EMAIL / SMTP_PASSWORD / RECIPIENT_EMAIL). "
-            "Skipping email dispatch."
-        )
-        # Save HTML to disk as a fallback
-        report_path = Path("last_report.html")
+    part_num  = results["part_num"]
+    n_new     = len(results["new_subs"])
+    n_active  = len(results["new_active"])
+    n_hv      = len(results["high_value"])
+
+    if not all([smtp_email, smtp_pass, recipient]):
+        log.warning("Email credentials incomplete — saving report to last_report.html instead.")
+        report_path = Path(f"last_report_part{part_num:02d}.html")
         report_path.write_text(html_body, encoding="utf-8")
-        log.info("HTML report saved locally to: %s", report_path.resolve())
+        log.info("Report saved: %s", report_path.resolve())
         return
 
-    parts_label = ", ".join(str(p) for p in parts_processed)
-    alert_emoji = "🚨" if hv_count > 0 else "📋"
+    alert_flag = "🚨" if n_hv > 0 else "📋"
     subject = (
-        f"{alert_emoji} [BugBounty-Recon] Parts {parts_label} — "
-        f"{new_count} New Subs | {active_count} Active | {hv_count} High-Value"
+        f"{alert_flag} [BugBounty-Recon] Part {part_num:02d}/{TOTAL_PARTS} — "
+        f"{n_new:,} New Subs | {n_active:,} Active | {n_hv} High-Value"
     )
 
-    # Plain-text fallback
     plain = (
-        f"BugBounty-Recon Daily Report — Developed by Ahmed Wael\n"
-        f"{'=' * 55}\n"
-        f"Parts Processed : {parts_label}\n"
-        f"New Subdomains  : {new_count}\n"
-        f"Active Hosts    : {active_count}\n"
-        f"High-Value Flags: {hv_count}\n"
-        f"{'=' * 55}\n"
-        "See the HTML version of this email for the full report.\n"
+        f"BugBounty-Recon Daily Report\n"
+        f"Developer: Ahmed Wael\n"
+        f"{'=' * 50}\n"
+        f"Part            : {part_num:02d} / {TOTAL_PARTS}\n"
+        f"New Subdomains  : {n_new:,}\n"
+        f"Active HTTP     : {n_active:,}\n"
+        f"High-Value      : {n_hv}\n"
+        f"Total Baseline  : {baseline_total:,}\n"
+        f"{'=' * 50}\n"
+        "See the HTML version of this email for the full structured report.\n"
     )
 
     msg = MIMEMultipart("alternative")
@@ -976,39 +960,104 @@ def send_email_report(
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
-    log.info("Sending HTML report to %s via %s:%d …", recipient, smtp_host, smtp_port)
+    log.info("Sending Part %02d report to %s …", part_num, recipient)
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
             srv.ehlo()
             srv.starttls()
-            srv.login(smtp_email, smtp_password)
+            srv.login(smtp_email, smtp_pass)
             srv.sendmail(smtp_email, recipient, msg.as_string())
-        log.info("Email report dispatched successfully.")
+        log.info("Email dispatched successfully (Part %02d).", part_num)
     except smtplib.SMTPException as exc:
         log.error("SMTP error: %s", exc)
     except OSError as exc:
         log.error("Network error while sending email: %s", exc)
 
+    # Also save HTML to disk as audit trail
+    report_path = Path(f"last_report_part{part_num:02d}.html")
+    report_path.write_text(html_body, encoding="utf-8")
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-def main() -> None:
+
+# ===========================================================================
+# Per-part pipeline wrapper
+# ===========================================================================
+
+def process_single_part(
+    part_num: int,
+    baseline_subs: set[str],
+    run_timestamp: str,
+) -> dict:
     """
-    Full daily recon pipeline orchestrator.
+    Run the complete reconnaissance pipeline for one part file.
 
-    Reads PARTS environment variable (comma-separated integers, e.g. "1,2,3")
-    to determine which part files to process in this run.
+    Returns a results dict containing all data needed for reporting and
+    baseline updates.  The caller is responsible for committing the baseline
+    after calling this function.
 
     Developer: Ahmed Wael
     """
-    # ── Resolve which parts to run ──────────────────────────────────────────
+    targets = load_part_targets([part_num])
+
+    if not targets:
+        log.warning("Part %02d: no targets found in file — skipping.", part_num)
+        return {
+            "part_num":      part_num,
+            "targets_count": 0,
+            "current_subs":  set(),
+            "new_subs":      set(),
+            "new_active":    [],
+            "high_value":    [],
+            "run_timestamp": run_timestamp,
+            "skipped":       True,
+        }
+
+    current_subs  = run_subfinder(targets)
+    probed_raw    = run_httpx(current_subs)
+    probed_hosts  = parse_httpx_results(probed_raw)
+    new_subs      = diff_subdomains(current_subs, baseline_subs)
+    new_active    = [h for h in probed_hosts if h["host"] in new_subs]
+    high_value    = triage_high_value(new_active)
+
+    return {
+        "part_num":      part_num,
+        "targets_count": len(targets),
+        "current_subs":  current_subs,
+        "new_subs":      new_subs,
+        "new_active":    new_active,
+        "high_value":    high_value,
+        "run_timestamp": run_timestamp,
+        "skipped":       False,
+    }
+
+
+# ===========================================================================
+# Entrypoint — sequential multi-part orchestrator
+# ===========================================================================
+
+def main() -> None:
+    """
+    Orchestrate sequential reconnaissance across all assigned part files.
+
+    Environment variables
+    ---------------------
+    PARTS            : comma-separated part numbers, e.g. "1,2,3,4,5,6,7,8,9"
+    SMTP_EMAIL       : sender address
+    SMTP_PASSWORD    : SMTP app password
+    RECIPIENT_EMAIL  : report inbox
+    SMTP_HOST        : (optional) SMTP server — default smtp.gmail.com
+    SMTP_PORT        : (optional) SMTP port    — default 587
+
+    Execution flow (per part)
+    -------------------------
+      load targets → subfinder → httpx → diff → triage
+      → HTML report → email → update baseline
+      → 3-minute cooldown (except after final part)
+
+    Developer: Ahmed Wael
+    """
     parts_env = os.environ.get("PARTS", "").strip()
     if not parts_env:
-        log.error(
-            "PARTS environment variable is not set. "
-            "Provide a comma-separated list, e.g. PARTS=1,2,3"
-        )
+        log.error("PARTS env var not set. Provide e.g. PARTS=1,2,3,4,5,6,7,8,9")
         sys.exit(1)
 
     try:
@@ -1017,65 +1066,68 @@ def main() -> None:
         log.error("PARTS must be comma-separated integers. Got: '%s'", parts_env)
         sys.exit(1)
 
-    invalid = [p for p in parts_to_run if not (1 <= p <= TOTAL_PARTS)]
+    invalid = [p for p in parts_to_run if not 1 <= p <= TOTAL_PARTS]
     if invalid:
-        log.error(
-            "Part numbers must be between 1 and %d. Invalid: %s",
-            TOTAL_PARTS,
-            invalid,
-        )
+        log.error("Part numbers out of range 1-%d: %s", TOTAL_PARTS, invalid)
         sys.exit(1)
 
     run_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    log.info("=" * 60)
+    log.info("=" * 65)
     log.info("BugBounty-Recon  |  Developer: Ahmed Wael")
-    log.info("Run timestamp   : %s", run_ts)
-    log.info("Parts to process: %s", parts_to_run)
-    log.info("=" * 60)
+    log.info("Run timestamp    : %s", run_ts)
+    log.info("Parts to process : %s  (%d total)", parts_to_run, len(parts_to_run))
+    log.info("Cooldown between : %s", _fmt_duration(COOLDOWN_BETWEEN_PARTS))
+    log.info("=" * 65)
 
-    # ── Pipeline ─────────────────────────────────────────────────────────────
-    targets       = load_part_targets(parts_to_run)
-    current_subs  = run_subfinder(targets)
-    probed_raw    = run_httpx(current_subs)
-    probed_hosts  = parse_httpx_results(probed_raw)
-    baseline_subs = load_baseline(BASELINE_FILE)
-    new_subs      = diff_subdomains(current_subs, baseline_subs)
+    baseline = load_baseline(BASELINE_FILE)
+    grand_total_new = 0
 
-    # Filter probed results to only those in the new_subs set
-    new_active = [h for h in probed_hosts if h["host"] in new_subs]
-    high_value  = triage_high_value(new_active)
+    for idx, part_num in enumerate(parts_to_run):
+        log.info("")
+        log.info("▶▶▶  PART %02d  (%d of %d)  ◀◀◀", part_num, idx + 1, len(parts_to_run))
+        log.info("")
 
-    log.info(
-        "Summary → new: %d | new+active: %d | high-value: %d",
-        len(new_subs),
-        len(new_active),
-        len(high_value),
-    )
+        results = process_single_part(part_num, baseline, run_ts)
 
-    # ── Report & Alert ────────────────────────────────────────────────────────
-    if new_subs:
-        html_report = generate_html_report(
-            new_subs      = new_subs,
-            active_hosts  = new_active,
-            high_value_targets = high_value,
-            parts_processed    = parts_to_run,
-            run_timestamp      = run_ts,
-        )
-        send_email_report(
-            html_body       = html_report,
-            new_count       = len(new_subs),
-            active_count    = len(new_active),
-            hv_count        = len(high_value),
-            parts_processed = parts_to_run,
-        )
-        update_baseline(BASELINE_FILE, new_subs, baseline_subs)
-    else:
-        log.info("✅ No new subdomains discovered in this batch. Baseline unchanged.")
+        if results["skipped"]:
+            log.info("Part %02d skipped.", part_num)
 
-    log.info("=" * 60)
-    log.info("Batch complete — Parts %s", parts_to_run)
-    log.info("=" * 60)
+        elif results["new_subs"]:
+            n_new = len(results["new_subs"])
+            n_hv  = len(results["high_value"])
+            log.info(
+                "Part %02d: %d new | %d active | %d high-value",
+                part_num, n_new, len(results["new_active"]), n_hv,
+            )
+
+            # ── Generate & send HTML report ───────────────────────────────────
+            html = generate_html_report(results, baseline_total=len(baseline))
+            send_email_report(html, results, baseline_total=len(baseline))
+
+            # ── Update baseline immediately (next part sees these subs) ───────
+            update_baseline(BASELINE_FILE, results["new_subs"], baseline)
+            baseline = baseline | results["new_subs"]
+            grand_total_new += n_new
+
+        else:
+            log.info("Part %02d: no new subdomains discovered.", part_num)
+
+        # ── Cooldown (skip after the final part) ─────────────────────────────
+        if idx < len(parts_to_run) - 1:
+            next_part = parts_to_run[idx + 1]
+            log.info(
+                "⏸  Cooldown: %s before Part %02d …",
+                _fmt_duration(COOLDOWN_BETWEEN_PARTS), next_part,
+            )
+            time.sleep(COOLDOWN_BETWEEN_PARTS)
+
+    log.info("")
+    log.info("=" * 65)
+    log.info("All %d parts complete.  Grand total new subdomains: %d",
+             len(parts_to_run), grand_total_new)
+    log.info("Developer: Ahmed Wael  |  BugBounty-Recon")
+    log.info("=" * 65)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,10 @@
 # ============================================================
 # Developer : Ahmed Wael
 # Purpose   : Every Monday at 00:30 UTC, fetch the latest wildcards.txt
-#             from bounty-targets-data and split it into 21 equal part files
-#             (parts/part_01.txt … parts/part_21.txt) committed back to the
-#             repository so the daily recon workflow can consume them.
+#             from bounty-targets-data and split it into 63 equal part files
+#             (parts/part_01.txt … parts/part_63.txt) committed back to the
+#             repository so the daily recon workflow can process 9 parts
+#             per day across the 7-day week.
 # ============================================================
 
 name: "Weekly — Wildcard Split"
@@ -18,7 +19,7 @@ on:
 
 jobs:
   split:
-    name: "Fetch & Split Wildcards into 21 Parts"
+    name: "Fetch & Split Wildcards into 63 Parts"
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -50,11 +51,11 @@ jobs:
         run: |
           PART_COUNT=$(ls parts/part_*.txt 2>/dev/null | wc -l)
           echo "Part files created: $PART_COUNT"
-          if [ "$PART_COUNT" -ne 21 ]; then
-            echo "ERROR: Expected 21 part files, found $PART_COUNT"
+          if [ "$PART_COUNT" -ne 63 ]; then
+            echo "ERROR: Expected 63 part files, found $PART_COUNT"
             exit 1
           fi
-          echo "✅ All 21 part files verified."
+          echo "✅ All 63 part files verified."
           wc -l parts/part_*.txt | tail -1
 
       # ── Commit & Push ───────────────────────────────────────────────────────
@@ -69,7 +70,7 @@ jobs:
             echo "Part files are unchanged this week — nothing to commit."
           else
             WEEK=$(date -u +"%Y-W%V")
-            git commit -m "chore: weekly wildcard split ${WEEK} — 21 parts [skip ci]"
+            git commit -m "chore: weekly wildcard split ${WEEK} — 63 parts [skip ci]"
             git push
             echo "✅ Updated part files committed and pushed."
           fi
