@@ -468,7 +468,14 @@ def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
             continue
 
         # ── 2. Dead-code gate (blocklist only) ──────────────────────────────
-        code = item.get("status-code", 0)
+        # httpx ≥ 2.x emits "status_code" (underscore); older builds used
+        # "status-code" (hyphen).  Check both so neither format causes a
+        # silent miss that returns 0 and drops every host as "dead".
+        raw_code = item.get("status_code") or item.get("status-code") or 0
+        try:
+            code = int(raw_code)
+        except (ValueError, TypeError):
+            code = 0
         if code in DEAD_CODES:
             dropped_dead += 1
             continue
