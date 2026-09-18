@@ -360,7 +360,7 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
                 "-sc",
                 "-title",
                 "-follow-redirects",
-                "-prefer-https",
+
                 "-threads",       str(HTTPX_THREADS),
                 "-timeout",       str(HTTPX_HOST_TIMEOUT),
                 "-rate-limit",    str(HTTPX_RATE_LIMIT),
@@ -920,7 +920,8 @@ def send_email_report(html_body: str, results: dict, baseline_total: int) -> Non
     smtp_pass  = os.environ.get("SMTP_PASSWORD", "").strip()
     recipient  = os.environ.get("RECIPIENT_EMAIL", "").strip()
     smtp_host  = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
-    smtp_port  = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_port_raw = os.environ.get("SMTP_PORT", "587").strip()
+    smtp_port     = int(smtp_port_raw) if smtp_port_raw and smtp_port_raw.isdigit() else 587
 
     part_num  = results["part_num"]
     n_new     = len(results["new_subs"])
