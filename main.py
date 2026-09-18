@@ -23,6 +23,8 @@ import smtplib
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -120,12 +122,232 @@ def load_part_targets(part_numbers: list[int]) -> list[str]:
     return all_targets
 
 
+
+# ---------------------------------------------------------------------------
+# Duration formatter  (shared by progress ticker and summary lines)
+# ---------------------------------------------------------------------------
+def _fmt_duration(seconds: float) -> str:
+    """
+    Convert a raw second count into a compact, human-readable string.
+
+    Examples:
+        3661  → "1h 01m 01s"
+        90    → "1m 30s"
+        45    → "45s"
+        0.4   → "<1s"
+
+    Developer: Ahmed Wael
+    """
+    if seconds < 1:
+        return "<1s"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+# ---------------------------------------------------------------------------
+# Streaming subprocess helper  (with generic, dynamic progress tracking)
+# ---------------------------------------------------------------------------
+def _stream_subprocess(
+    cmd: list[str],
+    timeout_secs: int,
+    label: str,
+    total_input: int = 0,
+    progress_mode: str = "discover",
+    progress_every: float = 30.0,
+) -> tuple[int, list[str]]:
+    """
+    Execute *cmd* via Popen and stream **both** stdout and stderr line-by-line
+    to the console in real-time, flushing after every line so GitHub Actions
+    shows live output instead of a silent freeze.
+
+    Additionally, a background **progress ticker** thread fires every
+    *progress_every* seconds and prints a dynamic status line computed
+    entirely from the actual runtime state — no hardcoding, no assumptions.
+
+    Parameters
+    ----------
+    cmd            : shell command as a list of strings.
+    timeout_secs   : hard upper bound; process is killed if exceeded.
+    label          : short name shown in every log prefix, e.g. "subfinder".
+    total_input    : how many items were sent into the tool.
+                     Detected automatically from the caller and forwarded here
+                     so the ticker can compute a meaningful denominator.
+                     Set to 0 to suppress denominator-based stats.
+    progress_mode  : controls which progress formula is used.
+        "discover"  — output lines are RESULTS (subdomains found), not
+                      consumed inputs.  Reports discovery rate + elapsed time.
+                      ETA is shown as "indeterminate" because the final
+                      result count is unknown before the tool finishes.
+                      Used for subfinder.
+        "probe"     — output lines ≈ ITEMS PROCESSED (one JSON per host).
+                      Reports processed/total, percentage, and a real ETA
+                      derived from the live throughput rate.
+                      Used for httpx.
+    progress_every : seconds between progress-ticker log lines (default 30).
+
+    Threading model
+    ---------------
+      Main thread      — reads proc.stdout line-by-line; each line is
+                         appended to stdout_lines and flushed to console.
+      stderr daemon    — drains proc.stderr concurrently to prevent pipe
+                         deadlock when stdout consumes the OS pipe buffer.
+      Watchdog daemon  — armed with *timeout_secs*; kills proc if it does
+                         not finish in time, which collapses the stdout
+                         iterator and unblocks the main thread.
+      Ticker daemon    — wakes every *progress_every* seconds and prints a
+                         dynamic progress snapshot using len(stdout_lines),
+                         which is safe to read from a secondary thread under
+                         CPython's GIL (list.append + len are atomic).
+
+    Returns
+    -------
+    (returncode, stdout_lines)
+
+    Raises
+    ------
+    subprocess.TimeoutExpired — if the watchdog fires.
+    FileNotFoundError         — if the binary is not on PATH.
+
+    Developer: Ahmed Wael
+    """
+    stdout_lines: list[str] = []
+    timed_out  = threading.Event()
+    proc_done  = threading.Event()
+    start_time = time.monotonic()
+
+    # ── Spawn the process ──────────────────────────────────────────────────────
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,          # line-buffered in text mode → each newline flushes
+        encoding="utf-8",
+        errors="ignore",
+    )
+
+    # ── Watchdog daemon ────────────────────────────────────────────────────────
+    def _watchdog() -> None:
+        """Kill proc if it hasn't finished within timeout_secs."""
+        if not proc_done.wait(timeout=timeout_secs):
+            log.warning(
+                "[%s] ⏱ Hard timeout (%s) reached — killing process.",
+                label, _fmt_duration(timeout_secs),
+            )
+            timed_out.set()
+            proc.kill()
+
+    wd = threading.Thread(target=_watchdog, daemon=True, name=f"{label}-watchdog")
+    wd.start()
+
+    # ── Stderr drain daemon ────────────────────────────────────────────────────
+    def _drain_stderr() -> None:
+        """Stream stderr live without blocking the stdout reader."""
+        for raw in proc.stderr:
+            line = raw.rstrip("\n")
+            if line:
+                sys.stderr.write(f"  [{label}][stderr] {line}\n")
+                sys.stderr.flush()
+
+    se = threading.Thread(target=_drain_stderr, daemon=True, name=f"{label}-stderr")
+    se.start()
+
+    # ── Progress ticker daemon ─────────────────────────────────────────────────
+    def _ticker() -> None:
+        """
+        Periodically log a dynamic progress snapshot.
+
+        All values are computed at tick-time from live state — no estimation
+        is baked in at startup.  The formula adapts automatically to whatever
+        total_input and output count happen to be at each tick, making it
+        fully generic across any batch size.
+
+        Developer: Ahmed Wael
+        """
+        tick = 0
+        while not proc_done.wait(timeout=progress_every):
+            tick += 1
+            elapsed  = time.monotonic() - start_time
+            count    = len(stdout_lines)   # live read — GIL-safe in CPython
+            rate_ps  = count / elapsed if elapsed > 0 else 0.0  # items/sec
+            rate_pm  = rate_ps * 60                              # items/min
+
+            if progress_mode == "probe" and total_input > 0:
+                # ── PROBE mode: output line ≈ one host processed ───────────
+                pct      = min(count / total_input * 100.0, 100.0)
+                remain   = max(total_input - count, 0)
+                eta_secs = remain / rate_ps if rate_ps > 0 else None
+                eta_str  = _fmt_duration(eta_secs) if eta_secs is not None else "calculating…"
+
+                log.info(
+                    "[%s] ⏳ Tick #%d | Elapsed: %s | "
+                    "Probed: %d / %d  (%.1f%%) | "
+                    "Rate: %.1f hosts/min | ETA: %s",
+                    label, tick,
+                    _fmt_duration(elapsed),
+                    count, total_input, pct,
+                    rate_pm,
+                    eta_str,
+                )
+
+            else:
+                # ── DISCOVER mode: output lines are results, not consumed inputs ──
+                # ETA is inherently indeterminate (we don't know the final count),
+                # so we show discovery rate and hard-timeout headroom instead.
+                timeout_remaining = max(timeout_secs - elapsed, 0)
+                context = (
+                    f" (from {total_input} targets)" if total_input > 0 else ""
+                )
+                log.info(
+                    "[%s] ⏳ Tick #%d | Elapsed: %s | "
+                    "Found: %d subdomains%s | "
+                    "Rate: %.1f/min | Timeout in: %s",
+                    label, tick,
+                    _fmt_duration(elapsed),
+                    count, context,
+                    rate_pm,
+                    _fmt_duration(timeout_remaining),
+                )
+
+    tk = threading.Thread(target=_ticker, daemon=True, name=f"{label}-ticker")
+    tk.start()
+
+    # ── Main thread: stream stdout line-by-line ────────────────────────────────
+    for raw in proc.stdout:
+        line = raw.rstrip("\n")
+        if line:
+            stdout_lines.append(line)
+            sys.stdout.write(f"  [{label}] {line}\n")
+            sys.stdout.flush()
+
+    # stdout exhausted — wait for the process to fully exit
+    proc.wait()
+    proc_done.set()     # unblocks watchdog + ticker (they check this event)
+    se.join(timeout=5)  # give stderr thread a moment to flush final output
+
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout_secs)
+
+    return proc.returncode, stdout_lines
+
+
 # ---------------------------------------------------------------------------
 # Step 2 — Run subfinder
 # ---------------------------------------------------------------------------
 def run_subfinder(targets: list[str]) -> set[str]:
     """
-    Write *targets* to a temp file and invoke subfinder (silent/all-sources).
+    Write *targets* to a temp file and invoke subfinder (silent / all-sources).
+
+    stdout is streamed line-by-line to the GitHub Actions log in real-time via
+    _stream_subprocess(), so each discovered subdomain appears immediately
+    rather than only after the full run completes.
+
     Returns the full set of discovered subdomains (lower-cased).
 
     Developer: Ahmed Wael
@@ -134,61 +356,48 @@ def run_subfinder(targets: list[str]) -> set[str]:
         log.warning("No targets provided to subfinder. Skipping.")
         return set()
 
-    discovered: set[str] = set()
-
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix="sf_targets_"
     ) as tf:
         tf.write("\n".join(targets))
         targets_path = tf.name
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, prefix="sf_output_"
-    ) as of:
-        output_path = of.name
-
-    log.info("Running subfinder on %d targets …", len(targets))
+    log.info("=" * 55)
+    log.info("[subfinder] Starting — %d targets", len(targets))
+    log.info("=" * 55)
 
     try:
-        result = subprocess.run(
-            [
+        returncode, stdout_lines = _stream_subprocess(
+            cmd=[
                 "subfinder",
-                "-dL",     targets_path,
-                "-o",      output_path,
-                "-silent",
-                "-all",
+                "-dL",    targets_path,
+                "-silent",         # one subdomain per stdout line, no banners
+                "-all",            # enable all passive sources
             ],
-            capture_output=True,
-            text=True,
-            timeout=SUBFINDER_TIMEOUT,
+            timeout_secs=SUBFINDER_TIMEOUT,
+            label="subfinder",
+            total_input=len(targets),    # forwarded to ticker for context display
+            progress_mode="discover",    # output lines = results, not consumed inputs
+            progress_every=30.0,         # tick every 30 s
         )
 
-        if result.returncode != 0:
-            log.warning(
-                "subfinder exited with code %d. stderr: %s",
-                result.returncode,
-                result.stderr[:500],
-            )
+        if returncode != 0:
+            log.warning("[subfinder] Exited with non-zero code: %d", returncode)
 
-        raw = Path(output_path).read_text(encoding="utf-8", errors="ignore")
-        discovered = {
-            ln.strip().lower()
-            for ln in raw.splitlines()
-            if ln.strip()
-        }
-        log.info("subfinder discovered %d subdomains.", len(discovered))
+        # stdout_lines already contains exactly the discovered subdomains
+        discovered = {ln.strip().lower() for ln in stdout_lines if ln.strip()}
+        log.info("[subfinder] Finished — %d unique subdomains discovered.", len(discovered))
+        return discovered
 
     except FileNotFoundError:
-        log.error("subfinder binary not found. Ensure it is installed and on PATH.")
+        log.error("[subfinder] Binary not found. Ensure it is installed and on PATH.")
         sys.exit(1)
     except subprocess.TimeoutExpired:
-        log.error("subfinder timed out after %d seconds.", SUBFINDER_TIMEOUT)
+        log.error("[subfinder] Hard timeout (%ds) reached — process killed.", SUBFINDER_TIMEOUT)
         sys.exit(1)
     finally:
         Path(targets_path).unlink(missing_ok=True)
-        Path(output_path).unlink(missing_ok=True)
 
-    return discovered
 
 
 # ---------------------------------------------------------------------------
@@ -207,75 +416,71 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         log.info("No subdomains to probe with httpx.")
         return []
 
-    results: list[dict] = []
-
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix="hx_input_"
     ) as tf:
         tf.write("\n".join(sorted(subdomains)))
         input_path = tf.name
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, prefix="hx_output_"
-    ) as of:
-        output_path = of.name
+    log.info("=" * 55)
+    log.info("[httpx] Starting — %d subdomains  (threads=%d)", len(subdomains), HTTPX_THREADS)
+    log.info("=" * 55)
 
-    log.info("Running httpx on %d subdomains (threads=%d) …", len(subdomains), HTTPX_THREADS)
+    results: list[dict] = []
 
     try:
-        proc = subprocess.run(
-            [
+        # httpx writes one JSON object per line to stdout when -json is used
+        # without an -o flag.  _stream_subprocess streams each line live so
+        # GitHub Actions shows active hosts as they are probed in real-time.
+        returncode, stdout_lines = _stream_subprocess(
+            cmd=[
                 "httpx",
-                "-l",              input_path,
-                "-o",              output_path,
-                "-json",
-                "-silent",
-                "-sc",                              # include status code
-                "-title",                           # include page title
+                "-l",             input_path,
+                "-json",                          # one JSON obj per line → stdout
+                # NO -silent so httpx can emit progress to stderr if desired
+                "-sc",                            # embed status code in JSON
+                "-title",                         # embed page title in JSON
                 "-follow-redirects",
                 "-prefer-https",
-                "-threads",        str(HTTPX_THREADS),
-                "-timeout",        str(HTTPX_HOST_TIMEOUT),
-                "-rate-limit",     str(HTTPX_RATE_LIMIT),
-                "-retries",        "1",
+                "-threads",       str(HTTPX_THREADS),
+                "-timeout",       str(HTTPX_HOST_TIMEOUT),
+                "-rate-limit",    str(HTTPX_RATE_LIMIT),
+                "-retries",       "1",
             ],
-            capture_output=True,
-            text=True,
-            timeout=HTTPX_TIMEOUT_CLI,
+            timeout_secs=HTTPX_TIMEOUT_CLI,
+            label="httpx",
+            total_input=len(subdomains),   # dynamic — exact count from subfinder output
+            progress_mode="probe",         # each stdout line = one host processed → real %
+            progress_every=30.0,           # tick every 30 s
         )
 
-        if proc.returncode != 0:
-            log.warning(
-                "httpx exited with code %d. stderr: %s",
-                proc.returncode,
-                proc.stderr[:500],
-            )
+        if returncode != 0:
+            log.warning("[httpx] Exited with non-zero code: %d", returncode)
 
-        raw_lines = Path(output_path).read_text(encoding="utf-8", errors="ignore").splitlines()
-        for line in raw_lines:
+        # Parse JSON lines collected from stdout
+        for line in stdout_lines:
             line = line.strip()
             if not line:
                 continue
             try:
-                obj = json.loads(line)
-                results.append(obj)
+                results.append(json.loads(line))
             except json.JSONDecodeError:
-                continue  # skip malformed lines
+                continue   # skip any non-JSON progress lines
 
-        log.info("httpx probed %d active hosts.", len(results))
+        log.info("[httpx] Finished — %d active hosts confirmed.", len(results))
 
     except FileNotFoundError:
         log.warning(
-            "httpx binary not found. HTTP probing phase skipped. "
-            "Install httpx: go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
+            "[httpx] Binary not found — HTTP probing phase skipped. "
+            "Install: go install github.com/projectdiscovery/httpx/cmd/httpx@latest"
         )
     except subprocess.TimeoutExpired:
-        log.error("httpx timed out after %d seconds.", HTTPX_TIMEOUT_CLI)
+        log.error("[httpx] Hard timeout (%ds) reached — process killed.", HTTPX_TIMEOUT_CLI)
     finally:
         Path(input_path).unlink(missing_ok=True)
-        Path(output_path).unlink(missing_ok=True)
 
     return results
+
 
 
 # ---------------------------------------------------------------------------
