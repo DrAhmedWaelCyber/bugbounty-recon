@@ -402,27 +402,91 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
 
 def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
     """
-    Normalise raw httpx JSON objects into a consistent dict schema.
+    Normalise raw httpx JSON objects into a consistent dict schema AND
+    enforce strict quality filtering so that 404s, dead endpoints, and
+    wildcard noise never enter the pipeline.
+
+    Filtering rules (applied in order)
+    ------------------------------------
+    1. Status-code gate  — drop 0 (no response), 404 (not found), 410 (gone),
+                           400 (bad request).  Only keep codes that signal a
+                           real, reachable host: 2xx, 3xx, 401, 403, 405, 500+.
+    2. Wildcard-noise gate — drop hosts whose leftmost label is a single
+                             character, purely numeric, or matches known
+                             mass-auto-generated patterns (e.g. hosts that
+                             start with digits like "1234.example.com" or look
+                             like CDN edge nodes).
+    3. Empty-host gate   — always drop if the resolved hostname is blank.
 
     Returned keys: host, url, status_code, title, server
 
     Developer: Ahmed Wael
     """
+    # Status codes considered dead or noise — never worth reporting
+    DEAD_CODES: frozenset[int] = frozenset([0, 400, 404, 410])
+
+    # Status codes that confirm a real, reachable service
+    ACTIVE_CODES: frozenset[int] = frozenset([
+        200, 201, 202, 204,
+        301, 302, 303, 307, 308,
+        401, 403, 405,
+        500, 502, 503,
+    ])
+
     parsed: list[dict] = []
+    dropped_dead = 0
+    dropped_noise = 0
+
     for item in raw_results:
+        # ── 1. Normalise host ────────────────────────────────────────────────
         host = (item.get("input") or item.get("host") or "").strip().lower()
         if "://" in host:
             host = host.split("://", 1)[1].rstrip("/")
-        if not host:
+        # Strip port suffix for label inspection (e.g. "api.example.com:8080")
+        host_no_port = host.split(":")[0]
+        if not host_no_port:
+            dropped_noise += 1
             continue
+
+        # ── 2. Status-code gate ─────────────────────────────────────────────
+        code = item.get("status-code", 0)
+        if code in DEAD_CODES or (code not in ACTIVE_CODES):
+            dropped_dead += 1
+            continue
+
+        # ── 3. Wildcard / noise gate ────────────────────────────────────────
+        labels = host_no_port.split(".")
+        first_label = labels[0] if labels else ""
+
+        # Single-character labels are auto-generated / wildcard edge nodes
+        if len(first_label) <= 1:
+            dropped_noise += 1
+            continue
+
+        # Purely-numeric first label (e.g. "1234.cdn.example.com")
+        if first_label.isdigit():
+            dropped_noise += 1
+            continue
+
+        # Labels that look like UUID / hash fragments (32+ hex chars)
+        if len(first_label) >= 32 and all(c in "0123456789abcdef-" for c in first_label):
+            dropped_noise += 1
+            continue
+
         parsed.append({
-            "host":        host,
+            "host":        host_no_port,
             "url":         item.get("url", ""),
-            "status_code": item.get("status-code", 0),
+            "status_code": code,
             "title":       (item.get("title") or "").strip(),
             "server":      (item.get("webserver") or "").strip(),
         })
+
+    log.info(
+        "parse_httpx_results: %d kept | %d dropped (dead status) | %d dropped (noise/wildcard)",
+        len(parsed), dropped_dead, dropped_noise,
+    )
     return parsed
+
 
 
 # ===========================================================================
@@ -496,10 +560,20 @@ def triage_high_value(probed_hosts: list[dict]) -> list[dict]:
     Filter *probed_hosts* for high-value keyword matches, enrich with priority,
     and return sorted CRITICAL → HIGH → MEDIUM, then by status code.
 
+    Belt-and-suspenders: any host with a dead/404/0 status code is explicitly
+    skipped here even if it somehow bypassed parse_httpx_results filtering.
+
     Developer: Ahmed Wael
     """
+    # Codes that are meaningless for manual inspection
+    _DEAD: frozenset[int] = frozenset([0, 400, 404, 410])
+
     flagged: list[dict] = []
     for h in probed_hosts:
+        code = h.get("status_code", 0)
+        # Hard reject — dead endpoints have no value in a triage report
+        if code in _DEAD:
+            continue
         matched = [kw for kw in HIGH_VALUE_KEYWORDS if kw in h["host"].lower()]
         if matched:
             enriched = {**h, "keywords": matched}
@@ -510,6 +584,7 @@ def triage_high_value(probed_hosts: list[dict]) -> list[dict]:
     flagged.sort(key=lambda x: (_order.get(x.get("priority", "MEDIUM"), 2), -x.get("status_code", 0)))
     log.info("High-value triage: %d / %d active hosts flagged.", len(flagged), len(probed_hosts))
     return flagged
+
 
 
 # ===========================================================================
@@ -909,7 +984,10 @@ def generate_html_report(results: dict, baseline_total: int) -> str:
 
 def send_email_report(html_body: str, results: dict, baseline_total: int) -> None:
     """
-    Send the HTML report via SMTP (STARTTLS).
+    Send the HTML report via SMTP (STARTTLS) and save it to disk.
+
+    Every step is logged explicitly so GitHub Actions shows exactly what
+    happened — no silent failures.
 
     Required env vars : SMTP_EMAIL, SMTP_PASSWORD, RECIPIENT_EMAIL
     Optional env vars : SMTP_HOST (default smtp.gmail.com), SMTP_PORT (default 587)
@@ -923,18 +1001,45 @@ def send_email_report(html_body: str, results: dict, baseline_total: int) -> Non
     smtp_port_raw = os.environ.get("SMTP_PORT", "587").strip()
     smtp_port     = int(smtp_port_raw) if smtp_port_raw and smtp_port_raw.isdigit() else 587
 
-    part_num  = results["part_num"]
-    n_new     = len(results["new_subs"])
-    n_active  = len(results["new_active"])
-    n_hv      = len(results["high_value"])
+    part_num = results["part_num"]
+    n_new    = len(results["new_subs"])
+    n_active = len(results["new_active"])
+    n_hv     = len(results["high_value"])
 
-    if not all([smtp_email, smtp_pass, recipient]):
-        log.warning("Email credentials incomplete — saving report to last_report.html instead.")
-        report_path = Path(f"last_report_part{part_num:02d}.html")
+    # ── Always save HTML to disk first so the artifact is never lost ──────────
+    report_path = Path(f"last_report_part{part_num:02d}.html")
+    try:
         report_path.write_text(html_body, encoding="utf-8")
-        log.info("Report saved: %s", report_path.resolve())
+        log.info("[email] HTML report saved to: %s  (%d bytes)",
+                 report_path.resolve(), report_path.stat().st_size)
+    except OSError as exc:
+        log.error("[email] Failed to write HTML report to disk: %s", exc)
+
+    # ── Pre-flight diagnostics ────────────────────────────────────────────────
+    log.info("[email] ── Pre-flight diagnostics ──────────────────────────")
+    log.info("[email]   SMTP_HOST      : %s", smtp_host or "(not set)")
+    log.info("[email]   SMTP_PORT      : %d", smtp_port)
+    log.info("[email]   SMTP_EMAIL     : %s", smtp_email or "(not set — email will NOT be sent)")
+    log.info("[email]   SMTP_PASSWORD  : %s", "set ✅" if smtp_pass else "NOT SET ❌")
+    log.info("[email]   RECIPIENT      : %s", recipient or "(not set — email will NOT be sent)")
+    log.info("[email] ──────────────────────────────────────────────────────")
+
+    # ── Credential gate ───────────────────────────────────────────────────────
+    missing = [name for name, val in [
+        ("SMTP_EMAIL", smtp_email),
+        ("SMTP_PASSWORD", smtp_pass),
+        ("RECIPIENT_EMAIL", recipient),
+    ] if not val]
+
+    if missing:
+        log.warning(
+            "[email] Missing required secret(s): %s — "
+            "email will NOT be sent. Report saved to disk only.",
+            ", ".join(missing),
+        )
         return
 
+    # ── Build message ─────────────────────────────────────────────────────────
     alert_flag = "🚨" if n_hv > 0 else "📋"
     subject = (
         f"{alert_flag} [BugBounty-Recon] Part {part_num:02d}/{TOTAL_PARTS} — "
@@ -961,22 +1066,65 @@ def send_email_report(html_body: str, results: dict, baseline_total: int) -> Non
     msg.attach(MIMEText(plain, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
-    log.info("Sending Part %02d report to %s …", part_num, recipient)
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
-            srv.ehlo()
-            srv.starttls()
-            srv.login(smtp_email, smtp_pass)
-            srv.sendmail(smtp_email, recipient, msg.as_string())
-        log.info("Email dispatched successfully (Part %02d).", part_num)
-    except smtplib.SMTPException as exc:
-        log.error("SMTP error: %s", exc)
-    except OSError as exc:
-        log.error("Network error while sending email: %s", exc)
+    log.info("[email] Subject  : %s", subject)
+    log.info("[email] To       : %s", recipient)
+    log.info("[email] Payload  : %d bytes (HTML body)", len(html_body))
 
-    # Also save HTML to disk as audit trail
-    report_path = Path(f"last_report_part{part_num:02d}.html")
-    report_path.write_text(html_body, encoding="utf-8")
+    # ── SMTP send — each step named in the log so failures are pinpointed ─────
+    try:
+        log.info("[email] Connecting to %s:%d …", smtp_host, smtp_port)
+        srv = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+
+        log.info("[email] EHLO …")
+        srv.ehlo()
+
+        log.info("[email] STARTTLS …")
+        srv.starttls()
+
+        # RFC 3207: re-identify after TLS upgrade — many servers reject login
+        # without a second EHLO post-TLS
+        log.info("[email] EHLO (post-TLS) …")
+        srv.ehlo()
+
+        log.info("[email] LOGIN …")
+        srv.login(smtp_email, smtp_pass)
+
+        log.info("[email] SENDMAIL …")
+        rejected = srv.sendmail(smtp_email, [recipient], msg.as_string())
+        srv.quit()
+
+        if rejected:
+            log.warning("[email] Delivery rejected for addresses: %s", rejected)
+        else:
+            log.info("[email] ✅ Email dispatched successfully (Part %02d).", part_num)
+
+    except smtplib.SMTPAuthenticationError as exc:
+        log.error(
+            "[email] ❌ Authentication failed (code %s): %s\n"
+            "  → Check SMTP_EMAIL and SMTP_PASSWORD secrets.\n"
+            "  → For Gmail, use an App Password (not your account password).\n"
+            "  → Ensure 2FA is enabled and the App Password was generated at:\n"
+            "      https://myaccount.google.com/apppasswords",
+            exc.smtp_code, exc.smtp_error,
+        )
+    except smtplib.SMTPConnectError as exc:
+        log.error(
+            "[email] ❌ Connection refused to %s:%d (code %s): %s\n"
+            "  → Check SMTP_HOST and SMTP_PORT secrets.",
+            smtp_host, smtp_port, exc.smtp_code, exc.smtp_error,
+        )
+    except smtplib.SMTPRecipientsRefused as exc:
+        log.error("[email] ❌ Recipient address refused: %s", exc.recipients)
+    except smtplib.SMTPException as exc:
+        log.error("[email] ❌ SMTP protocol error: %s  (type: %s)",
+                  exc, type(exc).__name__)
+    except TimeoutError:
+        log.error("[email] ❌ Connection timed out to %s:%d", smtp_host, smtp_port)
+    except OSError as exc:
+        log.error("[email] ❌ Network/OS error: %s  (errno %s)", exc, exc.errno)
+    except Exception as exc:                        # last-resort catch-all
+        log.error("[email] ❌ Unexpected error during send: %s  (type: %s)",
+                  exc, type(exc).__name__)
 
 
 # ===========================================================================
