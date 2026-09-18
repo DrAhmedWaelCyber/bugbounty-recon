@@ -332,8 +332,15 @@ def run_subfinder(targets: list[str]) -> set[str]:
 def run_httpx(subdomains: set[str]) -> list[dict]:
     """
     Probe *subdomains* with httpx; each active host's JSON result streams live.
-    Returns a list of raw JSON result dicts (one per responding host).
 
+    The command is kept intentionally lean:
+      -mc  restricts output to only the status codes we care about — dead
+           responses (404, 410, 400, 0) are dropped at the tool level before
+           any JSON line is even emitted, keeping stdout volume minimal.
+      -silent suppresses httpx's own progress banner from stderr.
+      -json  delivers one structured line per live host to stdout.
+
+    Returns a list of raw JSON result dicts (one per responding host).
     Gracefully degrades to empty list if httpx is not installed.
 
     Developer: Ahmed Wael
@@ -342,12 +349,16 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         log.info("[httpx] No subdomains to probe.")
         return []
 
+    # Status codes httpx should report — everything else is dropped by the tool
+    MATCH_CODES = "200,201,204,301,302,303,307,308,401,403,405,500,502,503"
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, prefix="hx_input_") as tf:
         tf.write("\n".join(sorted(subdomains)))
         input_path = tf.name
 
     log.info("─" * 55)
-    log.info("[httpx] Starting — %d subdomains  (threads=%d)", len(subdomains), HTTPX_THREADS)
+    log.info("[httpx] Starting — %d subdomains  (threads=%d, match-codes=%s)",
+             len(subdomains), HTTPX_THREADS, MATCH_CODES)
     log.info("─" * 55)
 
     results: list[dict] = []
@@ -355,16 +366,16 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         rc, lines = _stream_subprocess(
             cmd=[
                 "httpx",
-                "-l",             input_path,
-                "-json",
-                "-sc",
-                "-title",
-                "-follow-redirects",
-
-                "-threads",       str(HTTPX_THREADS),
-                "-timeout",       str(HTTPX_HOST_TIMEOUT),
-                "-rate-limit",    str(HTTPX_RATE_LIMIT),
-                "-retries",       "1",
+                "-l",         input_path,
+                "-json",                    # one JSON object per line → stdout
+                "-silent",                  # suppress httpx progress banner on stderr
+                "-sc",                      # embed status code in JSON
+                "-title",                   # embed page title in JSON
+                "-mc",        MATCH_CODES,  # drop dead codes at tool level
+                "-threads",   str(HTTPX_THREADS),
+                "-timeout",   str(HTTPX_HOST_TIMEOUT),
+                "-rate-limit", str(HTTPX_RATE_LIMIT),
+                "-retries",   "1",
             ],
             timeout_secs=HTTPX_TIMEOUT_CLI,
             label="httpx",
@@ -394,6 +405,7 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         Path(input_path).unlink(missing_ok=True)
 
     return results
+
 
 
 # ===========================================================================
@@ -786,51 +798,102 @@ def _build_hv_section(high_value: list[dict]) -> str:
 
 
 def _build_active_table(new_active: list[dict], high_value: list[dict]) -> str:
+    """
+    Render the active-HTTP-hosts section.
+
+    Design principles
+    -----------------
+    • Sort 200s first, then 403/401 (auth-gated), then redirects, then 5xx.
+    • Deduplicate on the parent domain — if 10 sub-subdomains of the same
+      parent all respond, show only the 3 highest-status-code ones to avoid
+      visual spam; the count of suppressed entries is shown in the row.
+    • High-value hosts get a left-border accent (⚡), not a full background wash.
+    • Cap at 150 rows; overflow count shown with a note to check baseline_subs.txt.
+
+    Developer: Ahmed Wael
+    """
     hv_hosts = {hv["host"] for hv in high_value}
-    cap = 250
-    capped = len(new_active) > cap
-    display = new_active[:cap]
+
+    # Sort: 200 > 403/401 > 3xx > 5xx
+    def _sort_key(h: dict) -> tuple:
+        code = h.get("status_code", 0)
+        order = {200: 0, 201: 0, 204: 0, 403: 1, 401: 1, 405: 1,
+                 301: 2, 302: 2, 307: 2, 308: 2, 303: 2,
+                 500: 3, 502: 3, 503: 3}
+        return (order.get(code, 9), h.get("host", ""))
+
+    sorted_active = sorted(new_active, key=_sort_key)
+
+    # Deduplicate per parent domain — keep top 3 per parent
+    from collections import defaultdict
+    by_parent: dict[str, list[dict]] = defaultdict(list)
+    for h in sorted_active:
+        parts = h["host"].split(".")
+        parent = ".".join(parts[-2:]) if len(parts) >= 2 else h["host"]
+        by_parent[parent].append(h)
+
+    deduped: list[dict] = []
+    suppressed_counts: dict[str, int] = {}
+    MAX_PER_PARENT = 3
+    for parent, hosts in by_parent.items():
+        deduped.extend(hosts[:MAX_PER_PARENT])
+        if len(hosts) > MAX_PER_PARENT:
+            suppressed_counts[parent] = len(hosts) - MAX_PER_PARENT
+
+    # Final cap
+    CAP = 150
+    display = deduped[:CAP]
+    total_suppressed_rows = max(len(new_active) - len(display), 0)
 
     if not display:
-        empty = """<tr><td colspan="4" style="padding:24px;text-align:center;
+        rows = """<tr><td colspan="3" style="padding:24px;text-align:center;
                    color:#94a3b8;font-style:italic;">
                    No active HTTP/S hosts detected in this batch.</td></tr>"""
-        rows = empty
     else:
         rows = ""
-        for h in sorted(display, key=lambda x: x.get("status_code", 0)):
-            is_hv   = h["host"] in hv_hosts
-            row_bg  = "#fefce8" if is_hv else ("#f8fafc" if display.index(h) % 2 == 0 else "#fff")
-            hv_icon = "⚡ " if is_hv else ""
+        for i, h in enumerate(display):
+            is_hv    = h["host"] in hv_hosts
+            row_bg   = "#fff" if i % 2 == 0 else "#f8fafc"
+            lborder  = "border-left:4px solid #f59e0b;" if is_hv else "border-left:4px solid transparent;"
+            hv_icon  = "⚡ " if is_hv else ""
+            title    = escape(h.get("title", "") or "")
+            server   = escape(h.get("server", "") or "")
+            subtitle = " · ".join(filter(None, [server, title]))[:80]
             rows += f"""
-        <tr style="background:{row_bg};border-bottom:1px solid #e2e8f0;">
-          <td style="padding:9px 14px;font-size:13px;color:#0f172a;word-break:break-all;">
-            {hv_icon}<a href="https://{escape(h['host'])}" style="color:#3730a3;text-decoration:none;">
-            {escape(h['host'])}</a>
+        <tr style="background:{row_bg};border-bottom:1px solid #e2e8f0;{lborder}">
+          <td style="padding:10px 14px;">
+            <div style="font-size:13px;font-weight:600;color:#0f172a;">
+              {hv_icon}<a href="https://{escape(h['host'])}"
+                style="color:#3730a3;text-decoration:none;">{escape(h['host'])}</a>
+            </div>
+            {"<div style='font-size:11px;color:#94a3b8;margin-top:2px;'>" + subtitle + "</div>" if subtitle else ""}
           </td>
-          <td style="padding:9px 8px;text-align:center;white-space:nowrap;">{_status_badge(h.get('status_code',0))}</td>
-          <td style="padding:9px 8px;font-size:12px;color:#475569;max-width:180px;
-                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-            {escape(h.get('server', '') or '—')}</td>
-          <td style="padding:9px 8px;font-size:12px;color:#475569;max-width:200px;
-                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-            {escape(h.get('title', '') or '—')}</td>
+          <td style="padding:10px 8px;text-align:center;white-space:nowrap;width:70px;">
+            {_status_badge(h.get("status_code", 0))}
+          </td>
         </tr>"""
 
-        if capped:
-            rows += f"""<tr><td colspan="4" style="padding:10px 14px;font-size:12px;
-                        color:#94a3b8;text-align:center;font-style:italic;">
-                        … and {len(new_active)-cap:,} more — see baseline_subs.txt</td></tr>"""
+        # Show parent-domain suppression notices inline
+        for parent, cnt in suppressed_counts.items():
+            rows += f"""
+        <tr style="background:#f0f9ff;border-bottom:1px solid #e0f2fe;">
+          <td colspan="2" style="padding:6px 14px;font-size:11px;color:#0369a1;
+              font-style:italic;">+ {cnt} more under <strong>{escape(parent)}</strong>
+              — see baseline_subs.txt</td>
+        </tr>"""
+
+        if total_suppressed_rows > 0:
+            rows += f"""<tr><td colspan="2" style="padding:10px 14px;font-size:12px;
+                        color:#64748b;text-align:center;background:#f8fafc;
+                        border-top:2px dashed #cbd5e1;">
+                        {total_suppressed_rows:,} additional hosts not shown — full list in baseline_subs.txt
+                        </td></tr>"""
 
     th = """<tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1;">
       <th style="padding:10px 14px;font-size:11px;color:#475569;font-weight:700;
-                 text-transform:uppercase;text-align:left;">Hostname</th>
+                 text-transform:uppercase;text-align:left;">Hostname / Title</th>
       <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
                  text-transform:uppercase;text-align:center;width:70px;">Status</th>
-      <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
-                 text-transform:uppercase;text-align:left;width:140px;">Server</th>
-      <th style="padding:10px 8px;font-size:11px;color:#475569;font-weight:700;
-                 text-transform:uppercase;text-align:left;">Title</th>
     </tr>"""
 
     return f"""
@@ -852,21 +915,64 @@ def _build_active_table(new_active: list[dict], high_value: list[dict]) -> str:
 
 
 def _build_dns_section(dns_only: list[str]) -> str:
+    """
+    Render the DNS-only discoveries section.
+
+    Groups subdomains by parent domain so the output reads as a structured
+    list rather than a flat flood of hundreds of pills.  Shows at most 5
+    subdomains per parent, with a "+N more" notice for the rest.
+
+    Developer: Ahmed Wael
+    """
     if not dns_only:
         return ""
 
-    cap = 400
-    display = dns_only[:cap]
-    pills = "".join(
-        f'<span style="display:inline-block;margin:3px 3px;padding:3px 10px;'
-        f'border-radius:20px;font-size:12px;color:#1e40af;'
-        f'background:#dbeafe;white-space:nowrap;">{escape(d)}</span>'
-        for d in display
-    )
+    from collections import defaultdict
+    by_parent: dict[str, list[str]] = defaultdict(list)
+    for sub in sorted(dns_only):
+        parts = sub.split(".")
+        parent = ".".join(parts[-2:]) if len(parts) >= 2 else sub
+        by_parent[parent].append(sub)
+
+    MAX_PER_PARENT = 5
+    CAP_PARENTS    = 80   # max parent-domain groups shown
+
+    groups_html = ""
+    for parent in sorted(by_parent)[:CAP_PARENTS]:
+        subs = by_parent[parent]
+        shown = subs[:MAX_PER_PARENT]
+        extra = len(subs) - len(shown)
+
+        pills = "".join(
+            f'<span style="display:inline-block;margin:2px 3px;padding:2px 9px;'
+            f'border-radius:20px;font-size:11px;color:#1e40af;'
+            f'background:#dbeafe;white-space:nowrap;">{escape(s)}</span>'
+            for s in shown
+        )
+        more = (
+            f'<span style="display:inline-block;margin:2px 3px;padding:2px 9px;'
+            f'border-radius:20px;font-size:11px;color:#64748b;'
+            f'background:#f1f5f9;white-space:nowrap;">+{extra} more</span>'
+            if extra else ""
+        )
+        groups_html += f"""
+      <tr style="border-bottom:1px solid #e2e8f0;">
+        <td style="padding:8px 14px;vertical-align:top;white-space:nowrap;
+                   width:160px;font-size:12px;font-weight:700;color:#334155;">
+          {escape(parent)}
+          <div style="font-size:10px;color:#94a3b8;font-weight:400;">
+            {len(subs)} sub{'' if len(subs)==1 else 's'}
+          </div>
+        </td>
+        <td style="padding:8px 8px 8px 0;">{pills}{more}</td>
+      </tr>"""
+
+    hidden_parents = max(len(by_parent) - CAP_PARENTS, 0)
     overflow = (
-        f'<p style="margin:8px 0 0;font-size:12px;color:#94a3b8;font-style:italic;">'
-        f'… and {len(dns_only)-cap:,} more (see baseline_subs.txt)</p>'
-        if len(dns_only) > cap else ""
+        f'<tr><td colspan="2" style="padding:8px 14px;font-size:11px;color:#94a3b8;'
+        f'font-style:italic;">… and {hidden_parents} more parent domains — '
+        f'see baseline_subs.txt</td></tr>'
+        if hidden_parents else ""
     )
 
     return f"""
@@ -877,12 +983,14 @@ def _build_dns_section(dns_only: list[str]) -> str:
   {_section_header("🌐", "New DNS Discoveries (no HTTP response)",
                    len(dns_only), "#2563eb")}
   <tr>
-    <td style="padding:16px 18px;">
-      {pills}
-      {overflow}
+    <td style="padding:0;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tbody>{groups_html}{overflow}</tbody>
+      </table>
     </td>
   </tr>
 </table>"""
+
 
 
 def _build_footer(part_num: int, run_ts: str) -> str:
@@ -1070,28 +1178,31 @@ def send_email_report(html_body: str, results: dict, baseline_total: int) -> Non
     log.info("[email] To       : %s", recipient)
     log.info("[email] Payload  : %d bytes (HTML body)", len(html_body))
 
-    # ── SMTP send — each step named in the log so failures are pinpointed ─────
+    # ── SMTP send — context manager guarantees connection is live before use ──
+    # Root cause of "please run connect() first": manually creating smtplib.SMTP()
+    # and then calling methods across a partial failure leaves the object in an
+    # uninitialised state.  Using `with smtplib.SMTP(...) as srv:` ensures the
+    # TCP connection is established and __enter__ completes before any method
+    # call, and __exit__ always calls quit() cleanly.
     try:
         log.info("[email] Connecting to %s:%d …", smtp_host, smtp_port)
-        srv = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as srv:
+            log.info("[email] EHLO …")
+            srv.ehlo()
 
-        log.info("[email] EHLO …")
-        srv.ehlo()
+            log.info("[email] STARTTLS …")
+            srv.starttls()
 
-        log.info("[email] STARTTLS …")
-        srv.starttls()
+            # RFC 3207 §4.2 — re-identify after TLS handshake; many servers
+            # reject LOGIN without a second EHLO issued post-TLS.
+            log.info("[email] EHLO (post-TLS) …")
+            srv.ehlo()
 
-        # RFC 3207: re-identify after TLS upgrade — many servers reject login
-        # without a second EHLO post-TLS
-        log.info("[email] EHLO (post-TLS) …")
-        srv.ehlo()
+            log.info("[email] LOGIN …")
+            srv.login(smtp_email, smtp_pass)
 
-        log.info("[email] LOGIN …")
-        srv.login(smtp_email, smtp_pass)
-
-        log.info("[email] SENDMAIL …")
-        rejected = srv.sendmail(smtp_email, [recipient], msg.as_string())
-        srv.quit()
+            log.info("[email] SENDMAIL …")
+            rejected = srv.sendmail(smtp_email, [recipient], msg.as_string())
 
         if rejected:
             log.warning("[email] Delivery rejected for addresses: %s", rejected)
@@ -1103,8 +1214,7 @@ def send_email_report(html_body: str, results: dict, baseline_total: int) -> Non
             "[email] ❌ Authentication failed (code %s): %s\n"
             "  → Check SMTP_EMAIL and SMTP_PASSWORD secrets.\n"
             "  → For Gmail, use an App Password (not your account password).\n"
-            "  → Ensure 2FA is enabled and the App Password was generated at:\n"
-            "      https://myaccount.google.com/apppasswords",
+            "  → Generate one at: https://myaccount.google.com/apppasswords",
             exc.smtp_code, exc.smtp_error,
         )
     except smtplib.SMTPConnectError as exc:

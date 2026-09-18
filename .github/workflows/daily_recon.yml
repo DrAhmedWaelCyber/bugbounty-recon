@@ -144,6 +144,12 @@ jobs:
           else
             DATE=$(date -u +"%Y-%m-%d")
             git commit -m "chore: update baseline_subs.txt [Parts ${{ env.PARTS }}] [${DATE}] [skip ci]"
+
+            # Pull any remote commits that landed since our checkout, then
+            # rebase our commit on top — prevents "fetch first" rejections when
+            # the weekly split or another daily run pushed while we were running.
+            git pull --rebase origin main
+
             git push
             echo "✅ Baseline committed and pushed."
           fi
