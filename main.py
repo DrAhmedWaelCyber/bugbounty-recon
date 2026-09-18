@@ -63,9 +63,9 @@ SUBFINDER_TIMEOUT = 3600
 HTTPX_TIMEOUT_CLI = 3600
 
 # httpx per-run settings
-HTTPX_THREADS      = 50
-HTTPX_HOST_TIMEOUT = 10
-HTTPX_RATE_LIMIT   = 150
+HTTPX_THREADS      = 150   # high concurrency for maximum throughput
+HTTPX_HOST_TIMEOUT = 3     # skip unresponsive hosts fast (seconds)
+HTTPX_RATE_LIMIT   = 300   # requests/second ceiling
 
 # ── High-value keyword taxonomy ──────────────────────────────────────────────
 # Any subdomain whose hostname contains one or more of these tokens is flagged.
@@ -331,14 +331,21 @@ def run_subfinder(targets: list[str]) -> set[str]:
 
 def run_httpx(subdomains: set[str]) -> list[dict]:
     """
-    Probe *subdomains* with httpx; each active host's JSON result streams live.
+    Probe *subdomains* with httpx at maximum speed.
 
-    The command is kept intentionally lean:
-      -mc  restricts output to only the status codes we care about — dead
-           responses (404, 410, 400, 0) are dropped at the tool level before
-           any JSON line is even emitted, keeping stdout volume minimal.
-      -silent suppresses httpx's own progress banner from stderr.
-      -json  delivers one structured line per live host to stdout.
+    Speed flags
+    -----------
+    -threads 150  : 150 concurrent probes
+    -timeout 3    : give each host exactly 3 s — dead hosts are skipped instantly
+    -retries 0    : zero retries — never waste time on a host that didn't respond
+    -no-color     : strip ANSI escape codes from any stderr output
+    -silent       : suppress httpx's own progress banner
+
+    Filtering flags
+    ---------------
+    -mc  : only emit JSON for these status codes; everything else (404, 410,
+           0, etc.) is discarded at the tool level — parse_httpx_results()
+           therefore receives only live hosts
 
     Returns a list of raw JSON result dicts (one per responding host).
     Gracefully degrades to empty list if httpx is not installed.
@@ -349,7 +356,8 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         log.info("[httpx] No subdomains to probe.")
         return []
 
-    # Status codes httpx should report — everything else is dropped by the tool
+    # Codes we want httpx to report. Mirrors ACTIVE_CODES in parse_httpx_results()
+    # exactly so there is no gap between tool-level and parser-level filtering.
     MATCH_CODES = "200,201,204,301,302,303,307,308,401,403,405,500,502,503"
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, prefix="hx_input_") as tf:
@@ -357,8 +365,10 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         input_path = tf.name
 
     log.info("─" * 55)
-    log.info("[httpx] Starting — %d subdomains  (threads=%d, match-codes=%s)",
-             len(subdomains), HTTPX_THREADS, MATCH_CODES)
+    log.info(
+        "[httpx] Starting — %d subdomains  threads=%d  timeout=%ds  retries=0",
+        len(subdomains), HTTPX_THREADS, HTTPX_HOST_TIMEOUT,
+    )
     log.info("─" * 55)
 
     results: list[dict] = []
@@ -366,16 +376,16 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
         rc, lines = _stream_subprocess(
             cmd=[
                 "httpx",
-                "-l",         input_path,
-                "-json",                    # one JSON object per line → stdout
-                "-silent",                  # suppress httpx progress banner on stderr
-                "-sc",                      # embed status code in JSON
-                "-title",                   # embed page title in JSON
-                "-mc",        MATCH_CODES,  # drop dead codes at tool level
-                "-threads",   str(HTTPX_THREADS),
-                "-timeout",   str(HTTPX_HOST_TIMEOUT),
-                "-rate-limit", str(HTTPX_RATE_LIMIT),
-                "-retries",   "1",
+                "-l",          input_path,
+                "-json",                      # structured output, one line per host
+                "-silent",                    # suppress httpx's progress banner
+                "-no-color",                  # strip ANSI codes from stderr
+                "-sc",                        # include status code in JSON
+                "-title",                     # include page title in JSON
+                "-mc",         MATCH_CODES,   # tool-level dead-code filter
+                "-threads",    str(HTTPX_THREADS),
+                "-timeout",    str(HTTPX_HOST_TIMEOUT),
+                "-retries",    "0",           # never retry — skip dead hosts fast
             ],
             timeout_secs=HTTPX_TIMEOUT_CLI,
             label="httpx",
@@ -408,45 +418,42 @@ def run_httpx(subdomains: set[str]) -> list[dict]:
 
 
 
+
 # ===========================================================================
 # Step 4 — Normalise httpx results
 # ===========================================================================
 
 def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
     """
-    Normalise raw httpx JSON objects into a consistent dict schema AND
-    enforce strict quality filtering so that 404s, dead endpoints, and
-    wildcard noise never enter the pipeline.
+    Normalise raw httpx JSON objects into a consistent dict schema.
 
-    Filtering rules (applied in order)
-    ------------------------------------
-    1. Status-code gate  — drop 0 (no response), 404 (not found), 410 (gone),
-                           400 (bad request).  Only keep codes that signal a
-                           real, reachable host: 2xx, 3xx, 401, 403, 405, 500+.
-    2. Wildcard-noise gate — drop hosts whose leftmost label is a single
-                             character, purely numeric, or matches known
-                             mass-auto-generated patterns (e.g. hosts that
-                             start with digits like "1234.example.com" or look
-                             like CDN edge nodes).
-    3. Empty-host gate   — always drop if the resolved hostname is blank.
+    Filtering strategy
+    ------------------
+    Since httpx is already called with -mc (match-codes), the tool discards
+    404s and other dead codes before emitting any JSON.  The parser therefore
+    uses a minimal BLOCKLIST approach — only explicitly dead codes are dropped
+    here.  Using a closed ALLOWLIST (as before) caused valid responses with
+    codes like 202, 206, 429 to be silently discarded, resulting in 0 results.
+
+    Gates (in order)
+    ----------------
+    1. Empty-host gate   — drop entries with no resolvable hostname.
+    2. Dead-code gate    — drop only: 0 (no response), 404 (not found),
+                           410 (gone).  Every other code passes through.
+    3. Noise gate        — drop purely-numeric first labels (CDN IPs leaked as
+                           hostnames) and 32+ hex-char UUID/hash labels.
+                           One-character labels (a.example.com) are VALID and
+                           are no longer dropped.
 
     Returned keys: host, url, status_code, title, server
 
     Developer: Ahmed Wael
     """
-    # Status codes considered dead or noise — never worth reporting
-    DEAD_CODES: frozenset[int] = frozenset([0, 400, 404, 410])
-
-    # Status codes that confirm a real, reachable service
-    ACTIVE_CODES: frozenset[int] = frozenset([
-        200, 201, 202, 204,
-        301, 302, 303, 307, 308,
-        401, 403, 405,
-        500, 502, 503,
-    ])
+    # Only these codes are truly dead — everything else from httpx is live
+    DEAD_CODES: frozenset[int] = frozenset([0, 404, 410])
 
     parsed: list[dict] = []
-    dropped_dead = 0
+    dropped_dead  = 0
     dropped_noise = 0
 
     for item in raw_results:
@@ -455,32 +462,29 @@ def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
         if "://" in host:
             host = host.split("://", 1)[1].rstrip("/")
         # Strip port suffix for label inspection (e.g. "api.example.com:8080")
-        host_no_port = host.split(":")[0]
+        host_no_port = host.split(":")[0].strip()
         if not host_no_port:
             dropped_noise += 1
             continue
 
-        # ── 2. Status-code gate ─────────────────────────────────────────────
+        # ── 2. Dead-code gate (blocklist only) ──────────────────────────────
         code = item.get("status-code", 0)
-        if code in DEAD_CODES or (code not in ACTIVE_CODES):
+        if code in DEAD_CODES:
             dropped_dead += 1
             continue
 
-        # ── 3. Wildcard / noise gate ────────────────────────────────────────
-        labels = host_no_port.split(".")
+        # ── 3. Noise gate ────────────────────────────────────────────────────
+        labels      = host_no_port.split(".")
         first_label = labels[0] if labels else ""
 
-        # Single-character labels are auto-generated / wildcard edge nodes
-        if len(first_label) <= 1:
-            dropped_noise += 1
-            continue
-
-        # Purely-numeric first label (e.g. "1234.cdn.example.com")
+        # Purely-numeric first label — leaked IP-style CDN hostnames
+        # (e.g. "1234.cdn.example.com").  Note: one-character labels like
+        # "a.example.com" are intentionally NOT dropped — they are valid.
         if first_label.isdigit():
             dropped_noise += 1
             continue
 
-        # Labels that look like UUID / hash fragments (32+ hex chars)
+        # 32+ hex-character first label = UUID / hash auto-generated by CDN
         if len(first_label) >= 32 and all(c in "0123456789abcdef-" for c in first_label):
             dropped_noise += 1
             continue
@@ -494,10 +498,11 @@ def parse_httpx_results(raw_results: list[dict]) -> list[dict]:
         })
 
     log.info(
-        "parse_httpx_results: %d kept | %d dropped (dead status) | %d dropped (noise/wildcard)",
+        "parse_httpx_results: %d kept | %d dropped (dead code) | %d dropped (noise)",
         len(parsed), dropped_dead, dropped_noise,
     )
     return parsed
+
 
 
 
