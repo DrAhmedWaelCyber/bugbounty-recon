@@ -1,0 +1,155 @@
+# =============================================================
+# daily_recon.yml — BugBounty-Recon Daily Reconnaissance
+# =============================================================
+# Developer : Ahmed Wael
+# Purpose   : Run every day at 06:00 UTC, processing exactly 3 part files
+#             per day. The 21-part weekly rotation is derived automatically
+#             from the current day-of-week so that:
+#
+#               Mon → parts  1, 2, 3
+#               Tue → parts  4, 5, 6
+#               Wed → parts  7, 8, 9
+#               Thu → parts 10, 11, 12
+#               Fri → parts 13, 14, 15
+#               Sat → parts 16, 17, 18
+#               Sun → parts 19, 20, 21
+#
+#             Each run:
+#               1. Discovers subdomains (subfinder).
+#               2. Probes active hosts (httpx).
+#               3. Diffs against baseline to find new assets.
+#               4. Triages high-value targets.
+#               5. Sends a branded HTML email report.
+#               6. Commits updated baseline_subs.txt back to the repo.
+# =============================================================
+
+name: "Daily — Reconnaissance"
+
+on:
+  schedule:
+    # Every day at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: >
+          Comma-separated part numbers to process (e.g. 1,2,3).
+          Leave blank to auto-derive from today's day-of-week.
+        required: false
+        default: ""
+
+jobs:
+  recon:
+    name: "Daily Recon — ${{ github.event_name == 'workflow_dispatch' && inputs.parts != '' && format('Parts {0}', inputs.parts) || 'Auto Parts' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: write    # Required to push updated baseline_subs.txt
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Resolve which parts to run ─────────────────────────────────────────
+      - name: Resolve PARTS for this run
+        id: resolve_parts
+        run: |
+          # If the user explicitly specified parts via workflow_dispatch input, use those.
+          if [ -n "${{ inputs.parts }}" ]; then
+            PARTS="${{ inputs.parts }}"
+            echo "Using manually specified parts: $PARTS"
+          else
+            # Derive from current ISO day-of-week (1=Mon … 7=Sun)
+            DOW=$(date -u +"%u")
+            START=$(( (DOW - 1) * 3 + 1 ))
+            MID=$(( START + 1 ))
+            END=$(( START + 2 ))
+            PARTS="${START},${MID},${END}"
+            echo "Day-of-week=$DOW → derived parts: $PARTS"
+          fi
+
+          echo "PARTS=$PARTS" >> $GITHUB_ENV
+          echo "parts=$PARTS" >> $GITHUB_OUTPUT
+
+      # ── 3. Ensure part files exist (run split if missing) ────────────────────
+      - name: Check part files / run emergency split if needed
+        run: |
+          if [ ! -d "parts" ] || [ "$(ls parts/part_*.txt 2>/dev/null | wc -l)" -lt 21 ]; then
+            echo "⚠️  Part files missing — running split_wildcards.py now …"
+            pip install --upgrade pip requests -q
+            python split_wildcards.py
+          else
+            echo "✅ Part files present."
+          fi
+
+      # ── 4. Set up Python ──────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      # ── 5. Set up Go ──────────────────────────────────────────────────────────
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # ── 6. Install recon tools ────────────────────────────────────────────────
+      - name: Install subfinder
+        run: go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+      - name: Install httpx
+        run: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+      - name: Verify tool installations
+        run: |
+          echo "--- subfinder ---"
+          subfinder -version
+          echo "--- httpx ---"
+          httpx -version
+
+      # ── 7. Run reconnaissance pipeline ────────────────────────────────────────
+      - name: Run main.py (Parts ${{ steps.resolve_parts.outputs.parts }})
+        env:
+          PARTS:            ${{ env.PARTS }}
+          SMTP_EMAIL:       ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
+          RECIPIENT_EMAIL:  ${{ secrets.RECIPIENT_EMAIL }}
+          SMTP_HOST:        ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:        ${{ secrets.SMTP_PORT }}
+        run: python main.py
+
+      # ── 8. Commit updated baseline ────────────────────────────────────────────
+      - name: Commit and push updated baseline_subs.txt
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage baseline only
+          git add baseline_subs.txt
+
+          if git diff --cached --quiet; then
+            echo "baseline_subs.txt is unchanged — nothing to commit."
+          else
+            DATE=$(date -u +"%Y-%m-%d")
+            git commit -m "chore: update baseline_subs.txt [Parts ${{ env.PARTS }}] [${DATE}] [skip ci]"
+            git push
+            echo "✅ Baseline committed and pushed."
+          fi
+
+      # ── 9. Upload HTML report as artifact (audit trail) ──────────────────────
+      - name: Upload last_report.html (if generated)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "recon-report-parts-${{ env.PARTS }}-${{ github.run_number }}"
+          path: last_report.html
+          if-no-files-found: ignore
+          retention-days: 30

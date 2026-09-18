@@ -1,132 +1,38 @@
-# BugBounty-Recon GitHub Actions Workflow
-# Author: Ahmed Wael
+# ⚠️  DEPRECATED — BugBounty-Recon v1 Workflow
+# ================================================
+# Developer : Ahmed Wael
 #
-# Runs subfinder-based subdomain reconnaissance 3 times per day,
-# rotating through Batch 1, 2, and 3 to cover the full wildcard list.
-# Commits updated baseline_subs.txt back to the repo after each run.
+# This workflow has been superseded by the v2 architecture.
+# Please use the following workflows instead:
+#
+#   .github/workflows/weekly_split.yml  — Weekly wildcard split (runs every Monday)
+#   .github/workflows/daily_recon.yml   — Daily reconnaissance (runs every day)
+#
+# This file is kept for reference only and is intentionally disabled.
+# ================================================
 
-name: BugBounty Recon
+name: "[DEPRECATED] BugBounty Recon v1"
 
 on:
-  schedule:
-    # Batch 1 — 00:00 UTC (03:00 UTC+3)
-    - cron: "0 0 * * *"
-    # Batch 2 — 08:00 UTC (11:00 UTC+3)
-    - cron: "0 8 * * *"
-    # Batch 3 — 16:00 UTC (19:00 UTC+3)
-    - cron: "0 16 * * *"
-  # Allow manual trigger with a custom batch selection
   workflow_dispatch:
     inputs:
-      batch_id:
-        description: "Batch ID to run (1, 2, or 3)"
+      confirm:
+        description: "This workflow is deprecated. Use daily_recon.yml instead."
         required: true
-        default: "1"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
+        default: "abort"
 
 jobs:
-  recon:
-    name: "Recon Pipeline"
+  deprecated_notice:
+    name: "This workflow is deprecated"
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    permissions:
-      contents: write  # Required for git commit + push of baseline_subs.txt
-
-    env:
-      # Map each cron schedule to its batch ID.
-      # GitHub does not expose which cron triggered the run natively,
-      # so we derive it from the current UTC hour.
-      #
-      # 00:xx UTC  → Batch 1
-      # 08:xx UTC  → Batch 2
-      # 16:xx UTC  → Batch 3
-      #
-      # workflow_dispatch overrides this via the input.
-      BATCH_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.batch_id || '' }}
-
     steps:
-      # -----------------------------------------------------------------------
-      # 0. Checkout Repository
-      # -----------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # -----------------------------------------------------------------------
-      # 1. Derive BATCH_ID from cron schedule (schedule events only)
-      # -----------------------------------------------------------------------
-      - name: Derive BATCH_ID from schedule
-        if: github.event_name == 'schedule'
+      - name: Print deprecation notice
         run: |
-          HOUR=$(date -u +"%H")
-          if [ "$HOUR" -lt 4 ]; then
-            BATCH=1
-          elif [ "$HOUR" -lt 12 ]; then
-            BATCH=2
-          else
-            BATCH=3
-          fi
-          echo "Derived BATCH_ID=$BATCH from UTC hour $HOUR"
-          echo "BATCH_ID=$BATCH" >> $GITHUB_ENV
-
-      # -----------------------------------------------------------------------
-      # 2. Set Up Python
-      # -----------------------------------------------------------------------
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install Python dependencies
-        run: pip install --upgrade pip && pip install -r requirements.txt
-
-      # -----------------------------------------------------------------------
-      # 3. Set Up Go and Install subfinder
-      # -----------------------------------------------------------------------
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Install subfinder
-        run: go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-
-      - name: Verify subfinder installation
-        run: subfinder -version
-
-      # -----------------------------------------------------------------------
-      # 4. Run Reconnaissance Pipeline
-      # -----------------------------------------------------------------------
-      - name: Run main.py (Batch ${{ env.BATCH_ID }})
-        env:
-          BATCH_ID: ${{ env.BATCH_ID }}
-          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-        run: python main.py
-
-      # -----------------------------------------------------------------------
-      # 5. Commit & Push Updated Baseline
-      # -----------------------------------------------------------------------
-      - name: Commit updated baseline_subs.txt
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Only commit if the baseline file changed
-          if git diff --quiet baseline_subs.txt; then
-            echo "baseline_subs.txt is unchanged — nothing to commit."
-          else
-            git add baseline_subs.txt
-            git commit -m "chore: update baseline_subs.txt [Batch ${{ env.BATCH_ID }}] [skip ci]"
-            git push
-            echo "baseline_subs.txt committed and pushed."
-          fi
+          echo "============================================================"
+          echo "  ⚠️  DEPRECATED WORKFLOW"
+          echo "  This recon.yml has been replaced by:"
+          echo "    - weekly_split.yml  (weekly wildcard split)"
+          echo "    - daily_recon.yml   (daily reconnaissance)"
+          echo "  Developer: Ahmed Wael"
+          echo "============================================================"
+          exit 1

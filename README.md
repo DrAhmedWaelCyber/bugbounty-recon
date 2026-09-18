@@ -1,57 +1,54 @@
-# BugBounty-Recon
+# BugBounty-Recon v2
 
-> **Lightweight, high-performance, minimalist automation tool for Bug Bounty subdomain reconnaissance.**
+> **Smart, fully sustainable, and professional automated Bug Bounty subdomain reconnaissance pipeline.**
 >
-> **Author:** Ahmed Wael  
+> **Developer:** Ahmed Wael  
 > **License:** MIT
 
 ---
 
 ## Overview
 
-**BugBounty-Recon** continuously monitors wildcard bug bounty targets for newly observed subdomains by running scheduled reconnaissance via GitHub Actions. When new assets are discovered, you receive an immediate email alert.
+**BugBounty-Recon v2** is a high-performance, minimalist reconnaissance automation system built for serious bug bounty hunters. It continuously monitors the entire wildcard target universe from [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data), discovers new subdomains, probes for active HTTP hosts, triages high-value targets, and delivers a **professional branded HTML email report** — all automatically via GitHub Actions.
 
 ### Design Philosophy
 
-- **No Web UI** — pure CLI / GitHub Actions automation
-- **No database** — flat-file persistent state (`baseline_subs.txt`)
-- **No vulnerability scanning** — pure subdomain discovery only
-- **No HTTP probing** — no false-positive noise from live-host filtering
-- **No AI overhead** — deterministic, fast, predictable
+| Constraint | Decision |
+|---|---|
+| No Web UI | Pure CLI + GitHub Actions |
+| No database | Flat-file persistent state (`baseline_subs.txt`) |
+| No vulnerability scanning | DNS-level discovery + HTTP probing only |
+| No AI overhead | Deterministic, keyword-based triage |
+| Rate-limit safe | 21-part weekly rotation, 3 parts/day |
+| Timeout safe | Sub-90-minute daily runs via part sizing |
 
 ---
 
 ## Architecture
 
 ```
-wildcards.txt (live fetch)
-        │
-        ▼
-  Dynamic Batching  (Batch 1 / 2 / 3)
-        │
-        ▼
-  subfinder  (fast/silent, all sources)
-        │
-        ▼
-  Set Diff  ──────────── baseline_subs.txt
-        │
-    new_subs?
-       ├── YES ──► Email Alert  +  Baseline Update  +  Git Push
-       └── NO  ──► Exit cleanly
+                     ┌──────────────────────────────────┐
+  WEEKLY (Monday)    │       split_wildcards.py          │
+                     │  Fetch wildcards.txt → 21 parts   │
+                     │  parts/part_01.txt … part_21.txt  │
+                     └────────────┬─────────────────────┘
+                                  │ git commit + push
+                     ┌────────────▼─────────────────────┐
+  DAILY (06:00 UTC)  │            main.py                │
+                     │                                   │
+                     │  Day-of-week → 3 parts/day        │
+                     │  Mon→1,2,3  Tue→4,5,6  …          │
+                     │                                   │
+                     │  1. Load part targets             │
+                     │  2. subfinder  (DNS discovery)    │
+                     │  3. httpx      (HTTP probing)     │
+                     │  4. Set diff   (new assets)       │
+                     │  5. Triage     (high-value kw)    │
+                     │  6. HTML report generation        │
+                     │  7. SMTP email dispatch           │
+                     │  8. Baseline update + git push    │
+                     └──────────────────────────────────┘
 ```
-
----
-
-## Key Features
-
-| Feature | Detail |
-|---|---|
-| Live wildcard fetch | Pulls from `bounty-targets-data` on every run |
-| Dynamic batching | Splits total list into 3 equal batches automatically |
-| Batch rotation | GitHub Actions matrix runs each batch at different scheduled times |
-| Diffing engine | Python set arithmetic — zero dependencies beyond `requests` |
-| Email alerts | SMTP via `smtplib` (standard library), TLS secured |
-| Persistent state | `baseline_subs.txt` committed back to the repo after each run |
 
 ---
 
@@ -59,69 +56,118 @@ wildcards.txt (live fetch)
 
 ```
 bugbounty-recon/
-├── main.py                         # Core reconnaissance pipeline
-├── requirements.txt                # Python dependencies
-├── baseline_subs.txt               # Auto-managed persistent state (git-tracked)
+├── split_wildcards.py              # Weekly: fetch + split into 21 parts
+├── main.py                         # Daily: full recon pipeline
+├── requirements.txt                # Python: requests only
+├── baseline_subs.txt               # Auto-managed persistent state
+├── parts/                          # Auto-generated weekly (git-tracked)
+│   ├── part_01.txt
+│   ├── part_02.txt
+│   ⋮
+│   └── part_21.txt
 ├── .github/
 │   └── workflows/
-│       └── recon.yml               # GitHub Actions CI/CD workflow
-└── README.md                       # This file
+│       ├── weekly_split.yml        # Runs every Monday 00:30 UTC
+│       └── daily_recon.yml         # Runs every day 06:00 UTC
+└── README.md
 ```
+
+---
+
+## Weekly Rotation Schedule
+
+The 21 parts are consumed over 7 days at 3 parts per day:
+
+| Day | UTC Cron | Parts Processed |
+|---|---|---|
+| Monday | 06:00 | 1, 2, 3 |
+| Tuesday | 06:00 | 4, 5, 6 |
+| Wednesday | 06:00 | 7, 8, 9 |
+| Thursday | 06:00 | 10, 11, 12 |
+| Friday | 06:00 | 13, 14, 15 |
+| Saturday | 06:00 | 16, 17, 18 |
+| Sunday | 06:00 | 19, 20, 21 |
+
+---
+
+## Email Report
+
+Each successful daily run generates a **professional, responsive HTML email report** with:
+
+- **Header** — Tool name, run timestamp, parts processed, "Developed by Ahmed Wael"
+- **Stats Cards** — New Subdomains | Active HTTP Hosts | High-Value Alerts
+- **Active Hosts Table** — hostname, HTTP status badge (colour-coded), page title, keyword tags
+- **High-Value Targets Section** — Dedicated table for flagged hosts requiring manual inspection
+- **DNS-Only Section** — Subdomains found via DNS but not yet reachable over HTTP
+- **Footer** — Attribution, "Developed by Ahmed Wael", generation metadata
+
+### High-Value Keywords
+
+Hosts are flagged if their name contains any of these tokens:
+
+`admin`, `dev`, `staging`, `test`, `qa`, `uat`, `api`, `graphql`, `login`, `auth`, `sso`, `backup`,
+`portal`, `dashboard`, `console`, `panel`, `internal`, `intranet`, `vpn`, `jenkins`, `gitlab`,
+`jira`, `confluence`, `grafana`, `kibana`, `phpmyadmin`, `adminer`, `cpanel`, `monitor`,
+`metrics`, `beta`, `mail`, `webmail`, `db`, `database`, `redis`, `cache`, `old`, `legacy`, and more.
 
 ---
 
 ## Setup
 
-### 1. Fork / Clone this Repository
+### 1. Fork / Clone This Repository
 
 ```bash
 git clone https://github.com/<YOUR_USERNAME>/bugbounty-recon.git
 cd bugbounty-recon
 ```
 
-### 2. Install Dependencies Locally (optional)
+### 2. Add GitHub Secrets
 
-```bash
-pip install -r requirements.txt
-```
+Go to **Settings → Secrets and Variables → Actions → New repository secret**:
 
-### 3. Install subfinder
-
-```bash
-go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-```
-
-### 4. Configure GitHub Secrets
-
-Go to **Settings → Secrets and Variables → Actions → New repository secret** and add:
-
-| Secret Name | Description |
-|---|---|
-| `SMTP_EMAIL` | Sender Gmail address (e.g. `yourname@gmail.com`) |
-| `SMTP_PASSWORD` | Gmail App Password *(not your regular password — see below)* |
-| `RECIPIENT_EMAIL` | Inbox that receives the alerts |
-
-> **Gmail App Password:** Enable 2FA on your Google account, then go to  
-> `myaccount.google.com → Security → 2-Step Verification → App passwords`  
-> and generate a dedicated password for this tool.
-
-You may also optionally set:
-
-| Secret Name | Default | Description |
+| Secret | Required | Description |
 |---|---|---|
-| `SMTP_HOST` | `smtp.gmail.com` | SMTP server hostname |
-| `SMTP_PORT` | `587` | SMTP server port (STARTTLS) |
+| `SMTP_EMAIL` | ✅ | Sender Gmail address |
+| `SMTP_PASSWORD` | ✅ | Gmail App Password (not your regular password) |
+| `RECIPIENT_EMAIL` | ✅ | Inbox that receives the alert emails |
+| `SMTP_HOST` | ❌ | SMTP host (default: `smtp.gmail.com`) |
+| `SMTP_PORT` | ❌ | SMTP port (default: `587`) |
 
-### 5. Initialize the Baseline (First Run)
+> **Gmail App Password:** Enable 2FA → `myaccount.google.com → Security → App passwords` → generate one for this tool.
 
-On the very first run, `baseline_subs.txt` will not exist. The script handles this gracefully — every subdomain found becomes a "new" discovery and the file is created automatically. Subsequent runs will diff against this foundation.
+### 3. Enable GitHub Actions
+
+Go to **Actions → Enable Workflows**. Both workflows will run automatically on schedule.
+
+### 4. Run the Initial Split (Optional)
+
+Trigger `Weekly — Wildcard Split` manually from the Actions tab to populate the `parts/` directory immediately without waiting for Monday.
 
 ---
 
 ## Running Locally
 
+### Install Dependencies
+
 ```bash
-export BATCH_ID=1
+# Python
+pip install -r requirements.txt
+
+# Go tools
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+```
+
+### Run the Weekly Split
+
+```bash
+python split_wildcards.py
+```
+
+### Run a Daily Recon Batch
+
+```bash
+export PARTS="1,2,3"
 export SMTP_EMAIL="you@gmail.com"
 export SMTP_PASSWORD="your-app-password"
 export RECIPIENT_EMAIL="alerts@yourdomain.com"
@@ -129,73 +175,47 @@ export RECIPIENT_EMAIL="alerts@yourdomain.com"
 python main.py
 ```
 
-Set `BATCH_ID` to `1`, `2`, or `3` to process each third of the wildcard list.
-
 ---
 
-## GitHub Actions Schedule
-
-The workflow (`.github/workflows/recon.yml`) fires **3 times per day** at:
-
-| UTC Time | Batch | ~Local (UTC+3) |
-|---|---|---|
-| `00:00` | Batch 1 | 03:00 |
-| `08:00` | Batch 2 | 11:00 |
-| `16:00` | Batch 3 | 19:00 |
-
-Each run processes one third of the wildcard list, ensuring full target coverage every 24 hours with minimal resource consumption per job.
-
----
-
-## Email Alert Format
+## How Splitting Works
 
 ```
-Subject: [BugBounty-Recon] 🚨 42 New Subdomain(s) Found — Batch 2
+Total wildcards: ~9,500 unique targets (dynamic, fetched live)
 
-New subdomains were discovered during your latest reconnaissance run.
-Batch ID  : 2
-New Count : 42
+Batch size = ceil(9500 / 21) ≈ 453 targets per part
 
-============================================================
-NEW SUBDOMAINS:
-============================================================
-admin.example.com
-api-v2.target.io
-dev.another-program.com
-...
-============================================================
-Stay ahead. Stay safe.
-— BugBounty-Recon | Ahmed Wael
+part_01.txt  → targets[0    : 453]
+part_02.txt  → targets[453  : 906]
+…
+part_21.txt  → targets[8568 : 9500]
 ```
 
----
-
-## How Batching Works
-
-```
-Total wildcards: 9,000 targets
-Batch size     : ceil(9000 / 3) = 3,000
-
-Batch 1  →  targets[0    : 3000]
-Batch 2  →  targets[3000 : 6000]
-Batch 3  →  targets[6000 : 9000]
-```
-
-The wildcard count is fetched dynamically each run, so the batch size auto-adjusts as the upstream list grows.
+The count is recalculated fresh every Monday, so the system auto-adjusts as the upstream list grows.
 
 ---
 
 ## Persistent State
 
-`baseline_subs.txt` is a sorted, deduplicated flat file of all previously seen subdomains. After each run, the GitHub Actions workflow commits and pushes any updates back to the repository — so state persists across all future runs with zero external storage.
+`baseline_subs.txt` is a sorted, deduplicated flat file of every subdomain ever seen. After each run, the workflow commits and pushes any new entries — so state persists across all future runs with zero external storage or database.
 
 ---
 
 ## Security Notes
 
-- All credentials are injected exclusively via **GitHub Secrets** (never hardcoded).
-- The `baseline_subs.txt` file is committed using the built-in `GITHUB_TOKEN` with write permissions scoped to the repository only.
-- subfinder is invoked without any HTTP probing flags — it performs DNS-level discovery only.
+- All credentials are **GitHub Secrets only** — never hardcoded anywhere in the codebase.
+- `baseline_subs.txt` is committed using the built-in `GITHUB_TOKEN` scoped to this repository only.
+- subfinder performs DNS-level discovery only — no HTTP requests, no live host interaction.
+- httpx probing uses reasonable rate-limiting (`-rate-limit 150`) to avoid triggering WAFs.
+- Every commit from automation includes `[skip ci]` to prevent infinite workflow loops.
+
+---
+
+## Workflow Summary
+
+| Workflow | File | Trigger | Duration |
+|---|---|---|---|
+| Weekly Split | `weekly_split.yml` | Mon 00:30 UTC | ~2 min |
+| Daily Recon | `daily_recon.yml` | Daily 06:00 UTC | ~60–80 min |
 
 ---
 

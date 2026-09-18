@@ -1,0 +1,75 @@
+# ============================================================
+# weekly_split.yml — BugBounty-Recon Weekly Wildcard Splitter
+# ============================================================
+# Developer : Ahmed Wael
+# Purpose   : Every Monday at 00:30 UTC, fetch the latest wildcards.txt
+#             from bounty-targets-data and split it into 21 equal part files
+#             (parts/part_01.txt … parts/part_21.txt) committed back to the
+#             repository so the daily recon workflow can consume them.
+# ============================================================
+
+name: "Weekly — Wildcard Split"
+
+on:
+  schedule:
+    # Every Monday at 00:30 UTC
+    - cron: "30 0 * * 1"
+  workflow_dispatch:   # Allow manual trigger at any time
+
+jobs:
+  split:
+    name: "Fetch & Split Wildcards into 21 Parts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write   # Needed to commit and push the part files
+
+    steps:
+      # ── Checkout ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Python ─────────────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      # ── Run Splitter ────────────────────────────────────────────────────────
+      - name: Run split_wildcards.py
+        run: python split_wildcards.py
+
+      # ── Verify output ───────────────────────────────────────────────────────
+      - name: Verify part files were created
+        run: |
+          PART_COUNT=$(ls parts/part_*.txt 2>/dev/null | wc -l)
+          echo "Part files created: $PART_COUNT"
+          if [ "$PART_COUNT" -ne 21 ]; then
+            echo "ERROR: Expected 21 part files, found $PART_COUNT"
+            exit 1
+          fi
+          echo "✅ All 21 part files verified."
+          wc -l parts/part_*.txt | tail -1
+
+      # ── Commit & Push ───────────────────────────────────────────────────────
+      - name: Commit and push updated part files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add parts/
+
+          if git diff --cached --quiet; then
+            echo "Part files are unchanged this week — nothing to commit."
+          else
+            WEEK=$(date -u +"%Y-W%V")
+            git commit -m "chore: weekly wildcard split ${WEEK} — 21 parts [skip ci]"
+            git push
+            echo "✅ Updated part files committed and pushed."
+          fi
