@@ -30,7 +30,7 @@ on:
 
 jobs:
   recon:
-    name: "Recon — Batch ${{ env.BATCH_ID }}"
+    name: "Recon Pipeline"
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
