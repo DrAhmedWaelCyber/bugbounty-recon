@@ -1,4 +1,3 @@
-tweakimg.net
 kwsdose.be
 playuzleuven.be
 uzleuven.*
@@ -54,3 +53,4 @@ captcha-delivery.com
 expressvpn.com
 xvtest.net
 xvservice.net
+polymoon.it
