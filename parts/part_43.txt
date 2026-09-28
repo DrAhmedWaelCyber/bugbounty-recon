@@ -1,8 +1,6 @@
-ociadmin.cloud.8x8.com
-p8t.us
-packet8-pilot.net
 preview.8x8.vc
 prod.cloud.8x8.com
+rekap.8x8.com
 staging.cloud.8x8.com
 thinkingphones.com
 thinkingphones.net
@@ -54,3 +52,6 @@ amazon.it
 amazon.nl
 amazon.pl
 amazon.sa
+amazon.se
+amazon.sg
+www.amazon.*

@@ -1,8 +1,11 @@
-solarcity.com
 teslainsuranceservices.com
 tools.thefork.tech
 thetradedesk.com
 adsrvr.org
+wimpmusic.com
+tidalhifi.com
+*tidalhi.fi
+tdl.sh
 trello.services
 vacationhomerentals.com
 holidaylettings.com
@@ -52,5 +55,3 @@ bose.xx
 roke.co.uk
 anduril.au
 anduril.com
-anduril.com.au
-anduril.dev

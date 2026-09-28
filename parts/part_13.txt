@@ -1,9 +1,3 @@
-central.arubanetworks.com*
-juniper.net
-*cpqcorp.*
-*hpe.com
-*hpecore.*
-*hpecorp.net
 *hpqcorp.*
 *nimblestorage.*
 *plexxi.*
@@ -54,3 +48,10 @@ analytics-upl.iongroup.com
 anti-corruption.com
 anvil.com
 aphelion.se
+api-alt.seleritycorp.com
+api.seleritycorp.com
+asahi.cl.iongroup.com
+asahiasp.iongroup.com
+asianconverts.com
+asianfn.com
+aspectdsc.com

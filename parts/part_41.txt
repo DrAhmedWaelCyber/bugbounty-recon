@@ -1,4 +1,3 @@
-cbremega.com
 cbremelody.com
 cbreonline.com.mx
 cbreresidential.es
@@ -54,3 +53,5 @@ citrixworkspacesapi.net
 *developer.cloud.com
 onboarding-*.cloud.com
 anywhere.re
+bhgre.com
+c21.com

@@ -1,5 +1,3 @@
-bhgre.com
-c21.com
 cartus.com
 cbcworldwide.com
 century21.com
@@ -54,3 +52,6 @@ labs.8x8.com
 mavenlab.com
 moobicast.com
 moobidesk.com
+ociadmin.cloud.8x8.com
+p8t.us
+packet8-pilot.net

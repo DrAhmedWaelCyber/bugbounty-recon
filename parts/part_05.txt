@@ -1,3 +1,5 @@
+anduril.com.au
+anduril.dev
 andurildev.au
 andurildev.com
 cognition.ai
@@ -53,4 +55,3 @@ gliss.com
 got2b.com
 hairshop.hr
 henkel-adhesives.cn
-henkel-adhesives.com

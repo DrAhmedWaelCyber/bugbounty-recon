@@ -1,3 +1,6 @@
+cto-si.zebra.com
+cvsltc.reflexisinc.com
+dnacloud.zebra.com
 elotouch.com
 hartsystems.com
 jpmc.reflexisinc.com
@@ -52,5 +55,3 @@ wilmingtontrust.com
 2asc.com
 alex-as.com
 alexamerican.com
-americansystems.com
-ascgov.com

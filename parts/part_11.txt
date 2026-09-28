@@ -1,7 +1,3 @@
-aliyun.com
-amap.com
-cainiao.com
-damai.cn
 dingtalk.com
 ele.me
 fliggy.com
@@ -54,3 +50,8 @@ houseofpepsico.com
 jacklinksfritolay.com
 joy-pepsico.eu
 joyapp.mx
+joypepsico.com
+lays.com
+lays.pl
+lifewtr.com
+liptonicedtea.com

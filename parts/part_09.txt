@@ -1,5 +1,3 @@
-saytechnologies.com
-ba.com
 britishairways.com
 ascio.com
 enom.com
@@ -54,3 +52,6 @@ hertz.com
 *hertz.io
 airaffairs.com.au
 naimuri.com
+qinetiq.ca
+qinetiq.cloud
+qinetiq.co.uk
