@@ -1,3 +1,11 @@
+lostark.games.aws.dev
+arubanetworks.com*
+central.arubanetworks.com*
+juniper.net
+*cpqcorp.*
+*hpe.com
+*hpecore.*
+*hpecorp.net
 *hpqcorp.*
 *nimblestorage.*
 *plexxi.*
@@ -46,12 +54,3 @@ allegrodevelopment.org
 aml-kyc.com
 analytics-upl.iongroup.com
 anti-corruption.com
-anvil.com
-aphelion.se
-api-alt.seleritycorp.com
-api.seleritycorp.com
-asahi.cl.iongroup.com
-asahiasp.iongroup.com
-asianconverts.com
-asianfn.com
-aspectdsc.com

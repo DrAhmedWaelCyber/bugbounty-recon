@@ -1,3 +1,10 @@
+joy-pepsico.eu
+joyapp.mx
+joypepsico.com
+lays.com
+lays.pl
+lifewtr.com
+liptonicedtea.com
 looza.be
 missvickies.com
 moresmileswitheverybite.com
@@ -47,11 +54,3 @@ tastyrewards.com
 tostitos.com
 walkers.co.uk
 yachak.com
-lostark.games.aws.dev
-arubanetworks.com*
-central.arubanetworks.com*
-juniper.net
-*cpqcorp.*
-*hpe.com
-*hpecore.*
-*hpecorp.net

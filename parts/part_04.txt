@@ -1,11 +1,9 @@
+teslamotors.com
+solarcity.com
 teslainsuranceservices.com
 tools.thefork.tech
 thetradedesk.com
 adsrvr.org
-wimpmusic.com
-tidalhifi.com
-*tidalhi.fi
-tdl.sh
 trello.services
 vacationhomerentals.com
 holidaylettings.com
@@ -45,6 +43,7 @@ twinmotion.com
 enlivenhealth.co
 myomnicell.com
 omnicell.com
+phonepe.com
 discover.com
 discoverfinancial.com
 cds-snc.ca

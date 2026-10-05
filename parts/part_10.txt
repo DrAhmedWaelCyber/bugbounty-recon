@@ -1,3 +1,8 @@
+airaffairs.com.au
+naimuri.com
+qinetiq.ca
+qinetiq.cloud
+qinetiq.co.uk
 qinetiq.com
 qinetiq.com.au
 us.qinetiq.com
@@ -49,9 +54,3 @@ alibabapictures.com
 aliexpress.com
 aligames.com
 alimama.com
-alios.cn
-alisports.com
-aliyun.com
-amap.com
-cainiao.com
-damai.cn

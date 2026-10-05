@@ -1,3 +1,5 @@
+loctite-superbond.ee
+loctite-superbond.hr
 loctite-superglue.ro
 loctite-superkleber.at
 loctite-superljepilo.ba
@@ -52,6 +54,3 @@ prittworld.es
 proloctite.com
 raqn.io
 raqnhub.cn
-researchatelm.com
-resistol.com.mx
-rubson.com

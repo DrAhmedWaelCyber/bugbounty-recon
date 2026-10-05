@@ -1,3 +1,4 @@
+apexnews.com
 apexscores.io
 opr.news
 osite99.com
@@ -53,5 +54,3 @@ assurancewireless.com
 tesla.cn
 tesla.services
 tesla.com
-teslamotors.com
-solarcity.com
