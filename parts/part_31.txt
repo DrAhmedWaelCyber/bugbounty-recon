@@ -1,3 +1,12 @@
+in.abb.com
+it.abb.com
+motion.abb.com
+motors.abb.com
+motors.abb.com.cn
+pdc.abb.com
+pl.abb.com
+ru.abb.com
+stratus.abb.com
 tnb.com
 xc.abb.com
 3ce.com
@@ -45,12 +54,3 @@ windstream.net
 *uniti.com
 *unitibenefits.com
 *unitisolutions.com
-mongodb.com
-*ripio.com
-*ripiotrade.co
-deribit.com
-advisorchannel.com
-fidelity.com
-mystreetscape.com
-streetscape.com
-wealthscape.com

@@ -1,3 +1,12 @@
+e2ro.com
+eero.com
+rocketball.com
+stripchat.com
+test*.redoxengine.com
+oklink.com
+okx.com
+happening.dev
+luckydays.ca
 luckydays.com
 napoleoncasino.be
 napoleondice.be
@@ -45,12 +54,3 @@ securitytestfan.gov
 state.gov
 supportfan.gov
 usconsulate.gov
-usdoscloud.gov
-usembassy.gov
-usmission.gov
-ustraveldocs.com
-usvisascheduling.com
-usvisaappt.com
-vercel.com
-vercel.live
-gafg.com

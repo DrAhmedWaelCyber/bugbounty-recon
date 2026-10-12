@@ -1,3 +1,12 @@
+reckostaging.com
+stripe.com
+emaplan.com
+emoneyadvisor.com
+paystack.com
+paystackintegrations.com
+axisvalue.com
+bovis.es
+cbre-ea.com
 cbre-heery.com
 cbre.*
 cbreacquisitionholdings.com
@@ -45,12 +54,3 @@ norlandmanagedservices.com
 norlandmanagedservices.ie
 norlandmanagedservices.sg
 norlandms.co.uk
-norlandms.com
-norlandms.ie
-norlandprojects.co.uk
-pkfc.com
-romonet.com
-sequentra.com
-siteready.com
-sitereadyllc.com
-spacespot.com

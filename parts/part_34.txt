@@ -1,3 +1,12 @@
+sentinel-hub.cc
+sentinel-hub.com
+hypermint.com
+iron.xyz
+moonpay.com
+moonpaycloud.com
+swaps.xyz
+kasten.io
+securiti.ai
 veeam.com
 veeamgov.com
 apidt.org
@@ -45,12 +54,3 @@ travelguard.com
 travelguard.zurichna.com
 zurich-connect.at
 zurich.at
-zurich.co.ae
-zurich.co.id
-zurich.co.jp
-zurich.co.uk
-zurich.com
-zurich.com.ar
-zurich.com.au
-zurich.com.br
-zurich.com.hk

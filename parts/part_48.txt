@@ -1,3 +1,7 @@
+mercadopago.com.co
+mercadopago.com.mx
+mercadopago.com.pe
+mercadopago.com.uy
 mlstatic.com
 tucarro.com.ve
 mercadolibreexperience.com.*
@@ -50,7 +54,3 @@ gateway*.marriott.com
 acronis.com
 acronis.work
 devicelock.com
-smartcontract.com
-braintree-api.com
-braintree.tools
-braintreegateway.com

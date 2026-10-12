@@ -1,9 +1,3 @@
-danalockapps.com
-danalockservices.com
-dejoris.de
-enviso.io
-enviso.shop
-gantner.be
 gantner.com
 gantner.cloud
 gantnerindia.com
@@ -27,6 +21,8 @@ wecosystem.com
 app.spacelift.dev
 speakap.com
 speakap.io
+sqills.com
+sqills.team
 sppfonder.se
 storebrandrealestate.se
 storebrandfunds.com
@@ -54,3 +50,7 @@ skagenfunds.lu
 skagenfunds.nl
 skagenfunds.is
 skagenfunds.fi
+skagenfondene.dk
+skagenfonder.se
+skagenfunds.com
+skagenfondene.no

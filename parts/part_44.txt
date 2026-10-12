@@ -1,3 +1,12 @@
+*kerlanjobe.org
+*legacy.huntingtonhospital.org
+*mycslink.org
+*ourstory.huntingtonhospital.com
+*pricing.huntingtonhospital.com
+*sd.invio.dev
+*sgveconnect.com
+*sgveconnect.org
+*www.cshs.org
 *www.marinahospital.com
 lifetouch.com
 photoccino.com
@@ -45,12 +54,3 @@ key.com
 key2businesscard.com
 keyapsolutions.com
 keybank.com
-keydirect.com
-keyequipmentfinance.com
-laurelroad.com
-xuppay-statement-analyzer.com
-xuppay.com
-xupservicing.com
-xupsupport.com
-reuters.com
-thomsonreuters.com

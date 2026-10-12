@@ -1,3 +1,12 @@
+migames.com
+miinsurtech.cn
+miinsurtech.com
+miinsurtech.net
+mijiayoupin.com
+mioffice.cn
+mios.cn
+miot-spec.org
+mipay.com
 mipay.net
 miui.cn
 miui.com
@@ -45,12 +54,3 @@ zellepay.com
 developer*.earlywarning.com
 support*.earlywarning.com
 instacart.com
-instacart.tools
-ford.com
-lincoln.com
-motorcraft.com
-omnicraftautoparts.com
-quicklane.com
-abritel.fr
-bookabach.co.nz
-carrentals.com

@@ -1,3 +1,7 @@
+smartcontract.com
+braintree-api.com
+braintree.tools
+braintreegateway.com
 braintreepayments.com
 hyperwallet.com
 paydiant.com
@@ -50,7 +54,3 @@ skybingo.com
 skycasino.com
 skygamingcontent.com
 skypoker.com
-skyvegas.com
-sportinglife.com
-adaptive-shield.com
-bionic.ai

@@ -1,3 +1,12 @@
+norlandms.com
+norlandms.ie
+norlandprojects.co.uk
+pkfc.com
+romonet.com
+sequentra.com
+siteready.com
+sitereadyllc.com
+spacespot.com
 telfordhomes.london
 thinkesi.com
 trammellcrow.com
@@ -45,12 +54,3 @@ voteohio.gov
 8x8.id
 8x8.studio
 8x8.uk
-8x8.vc
-8x8cloud.net
-8x8e2e.com
-8x8hosts.internal
-8x8hosts.pilot
-8x8pilot.com
-8x8staging.com
-8x8testa.com
-8x8testb.com

@@ -1,3 +1,7 @@
+azcpggpc.ca
+canadapost-postescanada.ca
+infopost.ca
+postescanada-canadapost.ca
 backend-capital.com
 capital.com
 itcapital.io
@@ -50,7 +54,3 @@ dhl.com
 dhl.de
 dpdhl.com
 digi.pt
-digi.it
-digimobil.it
-digi-belgium.be
-digimobil.es

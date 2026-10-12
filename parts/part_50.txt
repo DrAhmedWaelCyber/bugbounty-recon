@@ -1,3 +1,7 @@
+skyvegas.com
+sportinglife.com
+adaptive-shield.com
+bionic.ai
 crowdstrike.com
 flowsecurity.app
 humio.com
@@ -50,7 +54,3 @@ gsam.com
 gspublishing.com
 gsselect.com
 honestdollar.com
-marcus.co.uk
-marcus.com
-qaglobal-liquidity.gs.com
-steamstatic.com

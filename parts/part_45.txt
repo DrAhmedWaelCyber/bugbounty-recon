@@ -1,3 +1,12 @@
+keydirect.com
+keyequipmentfinance.com
+laurelroad.com
+xuppay-statement-analyzer.com
+xuppay.com
+xupservicing.com
+xupsupport.com
+reuters.com
+thomsonreuters.com
 momoafrica.tech
 abr.com.au
 boavistascpc.com.br
@@ -45,12 +54,3 @@ hongyuanib.com
 mi.cn
 mi.com
 mifile.cn
-migames.com
-miinsurtech.cn
-miinsurtech.com
-miinsurtech.net
-mijiayoupin.com
-mioffice.cn
-mios.cn
-miot-spec.org
-mipay.com

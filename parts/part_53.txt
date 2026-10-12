@@ -1,3 +1,9 @@
+grabtaxi.com
+myteksi.com
+myteksi.net
+ovo.id
+ovofinansial.com
+kayak.com
 hey.com
 pci.shopifyinc.com
 shopify.com
@@ -48,9 +54,3 @@ x.com
 cloudflare.com
 teams.cloudflare.com
 srvcs.tumblr.com
-tumblr.com
-base.app
-cbhq.net
-coinbase-corp.com
-coinbase.com
-quip.com

@@ -1,3 +1,12 @@
+stentra.com
+stichjs.com
+support-staging.barracudafx.com
+support.barracudafx.com
+tele2asp.iongroup.com
+tele2drasp.iongroup.com
+thefixedincomegroup.com
+themergermarketgroup.com
+thetriple-point.com
 thewallstreetsystem.com
 thewallstreetsystem.net
 tiaa.cl.iongroup.com
@@ -45,12 +54,3 @@ triplepointtechnology.com
 triplepointtechnology.info
 triplepointtechnology.name
 triplepointtechnology.net
-triplepointtechnology.org
-triplepointtechnology.us
-triplepointtechnologyblog.com
-trovatacash.com
-tsd.cl.iongroup.com
-tsdcarc.cl.iongroup.com
-tsdqmastor.cl.iongroup.com
-tsp.cl.iongroup.com
-tspcarc.cl.iongroup.com

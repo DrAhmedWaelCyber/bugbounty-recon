@@ -1,3 +1,12 @@
+vm.co.mz
+vnd.it
+voda.it
+vodacom.co.ls
+vodacom.co.tz
+vodacom.co.za
+vodafone-ip.de
+vodafone.al
+vodafone.co.uk
 vodafone.com
 vodafone.com.tr
 vodafone.cz
@@ -45,12 +54,3 @@ tescocloud.com
 tescoplc.com
 planet-labs.com
 planet.com
-sentinel-hub.cc
-sentinel-hub.com
-hypermint.com
-iron.xyz
-moonpay.com
-moonpaycloud.com
-swaps.xyz
-kasten.io
-securiti.ai

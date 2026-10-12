@@ -1,3 +1,7 @@
+lystit.com
+kiwi.com
+skypicker.com
+enjinusercontent.com
 berush.com
 myinsights.io
 prowly.com
@@ -44,13 +48,9 @@ tinderwebstaging.com
 tstaging.com
 tstaging.tools
 fetlife.com
+algolia.net
+algolianet.com
 grab-sure.com
 grab.co
 grab.com
 grabpay.com
-grabtaxi.com
-myteksi.com
-myteksi.net
-ovo.id
-ovofinansial.com
-kayak.com

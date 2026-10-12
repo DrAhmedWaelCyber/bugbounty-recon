@@ -1,3 +1,12 @@
+8x8.vc
+8x8cloud.net
+8x8e2e.com
+8x8hosts.internal
+8x8hosts.pilot
+8x8pilot.com
+8x8staging.com
+8x8testa.com
+8x8testb.com
 acceptance.cloud.8x8.com
 ai.8x8.vc
 call-control.ie
@@ -45,12 +54,3 @@ yesware.com
 mendix.com
 timeseries.com
 timeseries.nl
-amazon.ae
-amazon.ca
-amazon.cl
-amazon.cn
-amazon.co.jp
-amazon.co.uk
-amazon.co.za
-amazon.com
-amazon.com.au

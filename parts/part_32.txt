@@ -1,3 +1,12 @@
+mongodb.com
+*ripio.com
+*ripiotrade.co
+deribit.com
+advisorchannel.com
+fidelity.com
+mystreetscape.com
+streetscape.com
+wealthscape.com
 fax.plus
 sign.plus
 arc.io
@@ -45,12 +54,3 @@ upc.hu
 vantagetowers.com
 vcol.co.uk
 vfpt.pt
-vm.co.mz
-vnd.it
-voda.it
-vodacom.co.ls
-vodacom.co.tz
-vodacom.co.za
-vodafone-ip.de
-vodafone.al
-vodafone.co.uk

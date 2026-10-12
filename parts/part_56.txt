@@ -1,3 +1,7 @@
+digi.it
+digimobil.it
+digi-belgium.be
+digimobil.es
 rcs-rds.ro
 digi.ro
 dpgmedia.be
@@ -36,14 +40,6 @@ internal.exoscale.ch
 www.fing.com*
 gulp.ch
 gulp.de
-account.api.here.com
-account.here.com
-mobilitygraph.hereapi.com
-router.hereapi.com
-scbe.api.here.com
-subp-router.hereapi.com
-here.com
-hereapi.com
 hln.be
 parool.nl
 houseofhr.com
@@ -54,3 +50,7 @@ iciparisxl.be
 pourvous.nl
 gamma.nl
 gamma.be
+karwei.nl
+intergamma.cloud
+intergamma.nl
+restintergamma.nl

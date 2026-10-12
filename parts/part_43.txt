@@ -1,3 +1,12 @@
+amazon.ae
+amazon.ca
+amazon.cl
+amazon.cn
+amazon.co.jp
+amazon.co.uk
+amazon.co.za
+amazon.com
+amazon.com.au
 amazon.com.be
 amazon.com.br
 amazon.com.co
@@ -45,12 +54,3 @@ www.amazon.*
 *huntingtonhospital.com
 *huntingtonhospital.net
 *huntingtonhospital.org
-*kerlanjobe.org
-*legacy.huntingtonhospital.org
-*mycslink.org
-*ourstory.huntingtonhospital.com
-*pricing.huntingtonhospital.com
-*sd.invio.dev
-*sgveconnect.com
-*sgveconnect.org
-*www.cshs.org

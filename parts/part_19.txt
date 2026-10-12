@@ -1,3 +1,12 @@
+ihbnext-col-db.cedacri.it
+ihbnext-col.mobile.cedacri.it
+ihbnext-mig.cedacri.it
+iif-renewables.com
+infra-africa.com
+infra-americas.com
+infra-asia.com
+infra-deals.com
+infra-europe.com
 infra-latam.com
 infra-latinamerica.com
 infra-news.com
@@ -45,12 +54,3 @@ kyribanow.com
 lab49.com
 latam-wire.com
 lawreportgroup.com
-legalextract.com
-legalxtract.com
-liquidpoint.com
-list-group.com
-list-group.eu
-list-group.it
-list-uk.co.uk
-list-uk.com
-list.es

@@ -1,3 +1,12 @@
+usdoscloud.gov
+usembassy.gov
+usmission.gov
+ustraveldocs.com
+usvisascheduling.com
+usvisaappt.com
+vercel.com
+vercel.live
+gafg.com
 globalatlantic.com
 kkr.cloud
 kkr.com
@@ -45,12 +54,3 @@ de.abb.com
 evcharging.abb.com
 fi.abb.com
 gb.abb.com
-in.abb.com
-it.abb.com
-motion.abb.com
-motors.abb.com
-motors.abb.com.cn
-pdc.abb.com
-pl.abb.com
-ru.abb.com
-stratus.abb.com

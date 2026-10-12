@@ -1,3 +1,12 @@
+instacart.tools
+ford.com
+lincoln.com
+motorcraft.com
+omnicraftautoparts.com
+quicklane.com
+abritel.fr
+bookabach.co.nz
+carrentals.com
 cheaptickets.com
 ean.com
 expedia-aarp.com
@@ -23,11 +32,6 @@ travelocity.ca
 travelocity.com
 vrbo.com
 wotif.com
-infra-prod.nsvcs.net
-onegraph.com
-ops.netlify.com
-services-prod.nsvcs.net
-services.netlify.com
 fanduel.com
 mgmt.fndlsb.net
 prd.fndlsb.net
@@ -50,7 +54,3 @@ mercadopago.cl
 mercadopago.com
 mercadopago.com.ar
 mercadopago.com.br
-mercadopago.com.co
-mercadopago.com.mx
-mercadopago.com.pe
-mercadopago.com.uy
