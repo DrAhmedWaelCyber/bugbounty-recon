@@ -1,3 +1,8 @@
+yoyogames.com
+apex-football.com
+operafootball.com
+feednews.com
+dailyadvent.com
 apexnews.com
 apexscores.io
 opr.news
@@ -48,9 +53,3 @@ services.repostnetwork.com
 api-*.soundcloud.com
 statuspage.io
 uscc.net
-uscc.com
-uscellular.com
-assurancewireless.com
-tesla.cn
-tesla.services
-tesla.com

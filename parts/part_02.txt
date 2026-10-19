@@ -1,3 +1,7 @@
+getdbt.com
+dbt.com
+dbtlabs.com
+kiln.it
 central.arubanetworks.com
 movilepay.com
 movilepay.com.br
@@ -49,8 +53,3 @@ opera.com
 opera-mini.net
 opera.news
 operanewsapp.com
-yoyogames.com
-apex-football.com
-operafootball.com
-feednews.com
-dailyadvent.com
