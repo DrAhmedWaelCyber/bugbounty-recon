@@ -1,6 +1,3 @@
-uscc.com
-uscellular.com
-assurancewireless.com
 tesla.cn
 tesla.services
 tesla.com
@@ -53,3 +50,7 @@ myomnicell.com
 omnicell.com
 phonepe.com
 discover.com
+discoverfinancial.com
+cds-snc.ca
+digital.canada.ca
+notification.canada.ca

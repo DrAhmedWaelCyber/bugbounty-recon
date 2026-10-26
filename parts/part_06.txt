@@ -1,8 +1,3 @@
-esalon.com
-eshop-henkel-adhesives.cn
-fester.com.mx
-flamecontrol.com
-fp-academy.in
 fyfeco.com
 glemvital.at
 gliss.com
@@ -53,3 +48,9 @@ loctite-consumer.se
 loctite-consumidor.co
 loctite-consumidor.com.sv
 loctite-consumidor.hn
+loctite-consumo.com.br
+loctite-maintenance.be
+loctite-maintenance.ch
+loctite-maintenance.es
+loctite-maintenance.fr
+loctite-maintenance.it

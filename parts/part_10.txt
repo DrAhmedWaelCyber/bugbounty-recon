@@ -1,12 +1,3 @@
-scorpionsoft.com
-soonr.com
-spanning.com
-spanningbackup.com
-trumethods.com
-unigma.com
-unitrends.com
-unitrendsmsp.com
-vorexlogin.com
 api.konghq.com
 experience.hyland.com
 app.hyland.eu
@@ -53,3 +44,13 @@ yogurette.de
 rwbaird.com
 buildstaging.com
 hex.tech
+hubspotemail.net
+hubspotpagebuilder.com
+hubspotpagebuilder.eu
+api*.hubapi.com
+api*.hubspot.com
+app*.hubspot.com
+1688.com
+9apps.com
+alibaba-inc.com
+alibaba.com

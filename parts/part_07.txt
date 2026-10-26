@@ -1,9 +1,3 @@
-loctite-consumo.com.br
-loctite-maintenance.be
-loctite-maintenance.ch
-loctite-maintenance.es
-loctite-maintenance.fr
-loctite-maintenance.it
 loctite-maintenance.nl
 loctite-maintenance.pl
 loctite-proizvodi-za-odrzavanje.hr
@@ -53,3 +47,10 @@ persillaundry.com
 perwoll.*
 perwoll.de
 phenion.com
+ponal.sk
+portalehenkel.it
+powercrete.com
+pravana.com
+pril-isis.com
+print-your-electronics-with-loctite.com
+prittworld.*
